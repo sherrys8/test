@@ -1,0 +1,20 @@
+# 构建产物
+build/
+*.apk
+*.dex
+*.class
+
+# 源码备份
+*.bak
+*.bak-*
+*.orig
+
+# 逆向分析与日志
+logs/
+*.log
+decode/
+*_dec/
+
+# 系统文件
+.DS_Store
+Thumbs.db
