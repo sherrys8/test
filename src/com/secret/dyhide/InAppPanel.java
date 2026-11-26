@@ -291,20 +291,6 @@ public class InAppPanel {
         }
     }
 
-    /** 右滑侧边栏 · 观看历史开关（即时保存） */
-    private static class MenuWatchSwitchListener
-            implements android.widget.CompoundButton.OnCheckedChangeListener {
-        @Override
-        public void onCheckedChanged(android.widget.CompoundButton buttonView, boolean isChecked) {
-            try {
-                MainHook.setMenuWatchHistoryHidden(isChecked);
-                Toast.makeText(buttonView.getContext(),
-                        "已保存，重启抖音后生效", Toast.LENGTH_SHORT).show();
-            } catch (Throwable ignored) {
-            }
-        }
-    }
-
     /** 需要重启才生效的开关提示 */
     private static class RestartTipListener
             implements android.widget.CompoundButton.OnCheckedChangeListener {

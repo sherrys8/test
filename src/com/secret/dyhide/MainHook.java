@@ -146,8 +146,6 @@ public class MainHook implements IXposedHookLoadPackage {
             java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
     /** 隐藏「清理缓存 → 聊天记录空间管理」页里的隐藏联系人，默认关（独立开关）。 */
     private static volatile boolean cleanStorageHidden = false;
-    /** 隐藏「我」页功能菜单里的「观看历史」入口，默认关。 */
-    private static volatile boolean menuWatchHistoryHidden = false;
     /** 侧边栏入口自定义删除：总开关。 */
     private static volatile boolean sidebarHideEnabled = false;
     /** 左侧「我」页侧滑栏要删除的入口名称名单（用户自定义，默认空）。 */
@@ -6549,10 +6547,6 @@ public class MainHook implements IXposedHookLoadPackage {
                     cleanStorageHidden = !"0".equals(line.substring(13).trim());
                     continue;
                 }
-                if (line.startsWith("watchhistory=")) {
-                    menuWatchHistoryHidden = !"0".equals(line.substring(13).trim());
-                    continue;
-                }
                 if (line.startsWith("sidebarhideon=")) {
                     sidebarHideEnabled = !"0".equals(line.substring(14).trim());
                     continue;
@@ -6667,7 +6661,6 @@ public class MainHook implements IXposedHookLoadPackage {
             peb.append(nm);
         }
         sb.append("profileentry=").append(peb).append('\n');
-        sb.append("watchhistory=").append(menuWatchHistoryHidden ? '1' : '0').append('\n');
         sb.append("sidebarhideon=").append(sidebarHideEnabled ? '1' : '0').append('\n');
         StringBuilder shb = new StringBuilder();
         for (String nm : sidebarHideNames) {
@@ -6930,30 +6923,6 @@ public class MainHook implements IXposedHookLoadPackage {
     static void setCleanStorageHidden(boolean hide) {
         cleanStorageHidden = hide;
         persistCurrent();
-    }
-
-    static boolean isMenuWatchHistoryHidden() { return menuWatchHistoryHidden; }
-
-    static void setMenuWatchHistoryHidden(boolean hide) {
-        menuWatchHistoryHidden = hide;
-        persistCurrent();
-        // 关闭时立即恢复「我」页菜单里被 GONE 的行
-        if (!hide) {
-            synchronized (SIDEBAR_HIDDEN) {
-                for (java.util.Map.Entry<android.view.View, Object[]> e
-                        : new java.util.ArrayList<>(SIDEBAR_HIDDEN.entrySet())) {
-                    try {
-                        android.view.View v = e.getKey();
-                        Object[] orig = e.getValue();
-                        if (v != null && orig != null && orig[0] instanceof Integer) {
-                            v.setVisibility((Integer) orig[0]);
-                        }
-                    } catch (Throwable ignored) {
-                    }
-                }
-                SIDEBAR_HIDDEN.clear();
-            }
-        }
     }
 
     // ===== 侧边栏入口自定义删除 =====
