@@ -157,9 +157,9 @@ public final class CompatCheck {
         out.add(new Checkpoint("main", "主界面 Activity",
                 req("MainActivity", "com.ss.android.ugc.aweme.main.MainActivity")));
         out.add(new Checkpoint("session", "消息会话列表",
-                req("LLD(List,boolean)", "LLD", 2,
+                req("LJLILLLLZI(List,boolean) [41.3]", "LJLILLLLZI", 2,
                         "com.ss.android.ugc.aweme.im.sdk.module.session.rips.list.BaseSessionListAdapter"),
-                req("LJLLLLLL(List)", "LJLLLLLL", 1,
+                req("setData(List) [41.3]", "setData", 1,
                         "com.ss.android.ugc.aweme.im.sdk.module.session.rips.list.BaseSessionListAdapter")));
         out.add(new Checkpoint("sessionItem", "会话项 / 未读状态",
                 req("CommonSessionItemState",
@@ -168,32 +168,32 @@ public final class CompatCheck {
                 req("User", "com.ss.android.ugc.aweme.profile.model.User"),
                 req("IMContact", "com.ss.android.ugc.aweme.im.service.model.IMContact")));
         out.add(new Checkpoint("follow", "关注 / 粉丝列表",
-                req("HA(List,*,boolean)", "HA", 3,
+                req("MF(List,*,boolean) [41.3]", "MF", 3,
                         "com.ss.android.ugc.aweme.following.ui.viewmodel.SelfFollowingRelationViewModel",
                         "com.ss.android.ugc.aweme.following.ui.viewmodel.OtherFollowingRelationViewModel"),
-                req("KA(List,*,boolean)", "KA", 3,
+                req("OF(List,*,boolean) [41.3]", "OF", 3,
                         "com.ss.android.ugc.aweme.following.ui.viewmodel.SelfFollowerRelationViewModel",
                         "com.ss.android.ugc.aweme.following.ui.viewmodel.OtherFollowerRelationViewModel")));
         out.add(new Checkpoint("share", "分享面板联系人",
-                req("IA(List)", "IA", 1, "com.ss.android.ugc.aweme.im.share.IMSharePanelViewModel")));
+                req("NF(List) [41.3]", "NF", 1, "com.ss.android.ugc.aweme.im.share.IMSharePanelViewModel")));
         out.add(new Checkpoint("banner", "私信横幅拦截",
                 req("LJ(*,*)", "LJ", 2,
                         "com.ss.android.ugc.aweme.im.sdk.notification.immessage.ImInnerPushManagerNew")));
         out.add(new Checkpoint("visitor", "主页访客列表",
-                req("LL(List,Map,boolean)", "LL", 3,
+                req("LJLILLLLZI(List,Map,boolean) [41.3]", "LJLILLLLZI", 3,
                         "com.ss.android.ugc.aweme.interaction.profilevisitor.adapter.ProfileVisitorAdapter")));
         out.add(new Checkpoint("interact", "互动消息列表",
                 req("NotificationAdapterV2",
                         "com.ss.android.ugc.aweme.socialnotice.view.adapter.NotificationAdapterV2",
                         "com.ss.android.ugc.aweme.notification.adapter.NotificationAdapterV2")));
         out.add(new Checkpoint("generic", "通用列表适配器",
-                req("LJLLLLLL(List)", "LJLLLLLL", 1,
+                req("setData(List) [41.3]", "setData", 1,
                         "com.ss.android.ugc.aweme.common.adapter.BaseAdapter")));
         out.add(new Checkpoint("cleanStorage", "聊天记录清理页",
                 req("CleanStorageAdapter",
                         "com.ss.android.ugc.aweme.im.business.cleanstoragepage.view.CleanStorageAdapter")));
         out.add(new Checkpoint("invite", "一起看邀请面板",
-                req("MateListSimpleSortVM.HA", "HA", 4,
+                req("MateListSimpleSortVM.MF [41.3]", "MF", 4,
                         "com.ss.android.ugc.aweme.mate.matelist.list.simplesort.MateListSimpleSortVM")));
         out.add(new Checkpoint("profileEntry", "个人主页卡片入口",
                 req("PandaCardEntriesServiceV3",

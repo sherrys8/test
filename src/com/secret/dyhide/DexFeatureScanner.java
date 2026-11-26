@@ -252,21 +252,26 @@ public final class DexFeatureScanner {
     /** 默认规则表：语义名 → 稳定特征。 */
     public static List<Feature> defaultFeatures() {
         List<Feature> out = new ArrayList<Feature>();
-        out.add(Feature.byString("profile_tab_manager", "个人主页 Tab 管理器 LX/1010;",
-                "ProfileTabManager", true));
-        out.add(Feature.byString("stateflow_impl", "KMP StateFlow 实现类 LX/16mc;",
+        // 41.3.0: X.0wC0；旧规则 "ProfileTabManager" 会误命中 OldCollectTabFragment，
+        // 改用该管理器独占的 Keva key 字符串（版本更新后若 key 变化需更新此规则）。
+        out.add(Feature.byString("profile_tab_manager", "个人主页 Tab 管理器",
+                "profile_tab_entered_set", true));
+        out.add(Feature.byString("stateflow_impl", "KMP StateFlow 实现类",
                 "MutableStateFlow.resetReplayCache is not supported", true));
-        out.add(Feature.byString("im_search_source", "IM 搜索源头 LX/0p04;",
+        out.add(Feature.byString("im_search_source", "IM 搜索源头",
                 "start search key:", false));
-        out.add(Feature.byString("load_state", "加载状态模型 LX/0ozx;",
+        out.add(Feature.byString("load_state", "加载状态模型",
                 "LOAD_SUCCESS_AND_OVER", true));
-        out.add(Feature.byMethods("user_comparable", "用户排序比较器 LX/07WK;/LX/07WO;",
+        out.add(Feature.byMethods("user_comparable", "用户排序比较器 41.3.0=X.06CG",
                 new MethodSig("user", 0, "Lcom/ss/android/ugc/aweme/profile/model/User;"),
                 new MethodSig("LIZ", 1, "Z"),
                 new MethodSig("LIZIZ", 1, "Z")));
-        out.add(Feature.byMethods("search_result_model", "搜索结果模型 LX/10js;",
+        // 41.3.0: X.1P7u；旧规则 LLFFF() 返回类型改为 String 导致 MISS，
+        // 改用 isHasMore + setHasMore + LJZ():List 三签名组合精确定位列表模型。
+        out.add(Feature.byMethods("search_result_model", "搜索结果模型 41.3.0=X.1P7u",
                 new MethodSig("isHasMore", 0, "Z"),
-                new MethodSig("LLFFF", 0, "Ljava/util/List;")));
+                new MethodSig("setHasMore", 1, "V"),
+                new MethodSig("LJZ", 0, "Ljava/util/List;")));
         return out;
     }
 

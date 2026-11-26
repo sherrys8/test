@@ -1146,17 +1146,23 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     // ============ 个人主页标签逐个隐藏（作品/日常/收藏/喜欢/去过）============
-    // 逆向抖X case 1：hook LX/1010.LJJJJL(User):List，after 阶段替换返回的 tab type 列表。
+    // 逆向抖X case 1：hook 标签管理器 .(User):List，after 阶段替换返回的 tab type 列表。
     // 返回 List<Integer>，元素为 ProfileTabItem.LIZ()；清单来自 User.profileTabInfoStruct.a。
+    // 40.8.0 = X.1010.LJJJJL ；41.3.0 = X.0wC0.LJJJLIIL（方法名也变了，故用数组兼容）。
+    private static final String[] PROFILE_TAB_METHODS = {"LJJJLIIL", "LJJJJL"};
 
     /** 安装个人主页标签隐藏 hook。 */
     private static void installProfileTabHide(ClassLoader cl) {
-        String used = DexClassMap.resolve("profile_tab_manager", "X.1010");
+        String used = DexClassMap.resolve("profile_tab_manager", "X.0wC0");
         try {
             Class<?> c = cl.loadClass(used);
             int hooked = 0;
             for (java.lang.reflect.Method m : c.getDeclaredMethods()) {
-                if (!"LJJJJL".equals(m.getName())) continue;
+                boolean nameOk = false;
+                for (String nm : PROFILE_TAB_METHODS) {
+                    if (nm.equals(m.getName())) { nameOk = true; break; }
+                }
+                if (!nameOk) continue;
                 Class<?>[] ps = m.getParameterTypes();
                 if (ps.length != 1 || !ps[0].getName().equals(
                         "com.ss.android.ugc.aweme.profile.model.User")) continue;
@@ -1169,7 +1175,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 hooked++;
             }
             DexClassMap.recordHook("profile_tab_manager", "个人页标签管理",
-                    "X.1010", used, hooked > 0, "LJJJJL(User):List x" + hooked);
+                    "X.1010", used, hooked > 0, "(User):List x" + hooked);
         } catch (Throwable t) {
             DexClassMap.recordHook("profile_tab_manager", "个人页标签管理",
                     "X.1010", used, false, t.getClass().getSimpleName() + " " + t.getMessage());
@@ -1178,7 +1184,7 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** hook LJJJJL 的返回列表：收集清单 + 按勾选过滤 tab type。 */
+    /** hook 标签管理器的 (User):List 返回列表：收集清单 + 按勾选过滤 tab type。 */
     private static class ProfileTabListHook extends XC_MethodHook {
         @Override
         protected void afterHookedMethod(MethodHookParam param) {
@@ -3658,30 +3664,15 @@ public class MainHook implements IXposedHookLoadPackage {
             } catch (Throwable ignored) {
             }
             if (ad == null) continue;
-            // LLF(List) 是抖音自带的过滤方法，返回 List<BaseNotice>：after 过滤返回值
-            try {
-                XposedHelpers.findAndHookMethod(ad, "LLF", List.class,
-                        new VisitorListFilter("interact-LLF", -1));
-                ok++;
-            } catch (Throwable t) {
-                XposedBridge.log(TAG + ": interact LLF hook failed: " + t);
-            }
-            // LJLLLLLL(List) 全量设置数据：before 过滤入参
-            try {
-                XposedHelpers.findAndHookMethod(ad, "LJLLLLLL", List.class,
-                        new VisitorListFilter("interact-LJLLLLLL", 0));
-                ok++;
-            } catch (Throwable t) {
-                XposedBridge.log(TAG + ": interact LJLLLLLL hook failed: " + t);
-            }
-            // LLI(List) DiffUtil 增量更新：before 过滤入参
-            try {
-                XposedHelpers.findAndHookMethod(ad, "LLI", List.class,
-                        new VisitorListFilter("interact-LLI", 0));
-                ok++;
-            } catch (Throwable t) {
-                XposedBridge.log(TAG + ": interact LLI hook failed: " + t);
-            }
+            // 40.8.0 LLF(List):List 自带过滤；41.3.0 LJLJJI(List):List
+            ok += hookByArity(ad, new String[]{"LJLJJI", "LLF"}, 1,
+                    new VisitorListFilter("interact-ret", -1), "interact-ret");
+            // 40.8.0 LJLLLLLL(List) 全量；41.3.0 setData(List)/LJLLILLLL(List)
+            ok += hookByArity(ad, new String[]{"setData", "LJLLILLLL", "LJLLLLLL"}, 1,
+                    new VisitorListFilter("interact-setdata", 0), "interact-setdata");
+            // 40.8.0 LLI(List) 增量；41.3.0 无对应，保留旧名兼容
+            ok += hookByArity(ad, new String[]{"LLI"}, 1,
+                    new VisitorListFilter("interact-diff", 0), "interact-diff");
             XposedBridge.log(TAG + ": interact-notice hooks installed on " + cn);
             break;
         }
@@ -3866,30 +3857,15 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> ad = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.interaction.profilevisitor.adapter.ProfileVisitorAdapter", cl);
-            // LL(List,Map,boolean) 返回转换后的 List<ProfileVisitorStruct>：after 过滤返回值
-            try {
-                XposedHelpers.findAndHookMethod(ad, "LL", List.class, Map.class, boolean.class,
-                        new VisitorListFilter("visitor-LL", -1));
-                ok++;
-            } catch (Throwable t) {
-                XposedBridge.log(TAG + ": visitor LL hook failed: " + t);
-            }
-            // LJZI(List,Map,boolean) 入参 List<User>：before 过滤（双保险，覆盖不同版本）
-            try {
-                XposedHelpers.findAndHookMethod(ad, "LJZI", List.class, Map.class, boolean.class,
-                        new VisitorListFilter("visitor-LJZI", 0));
-                ok++;
-            } catch (Throwable t) {
-                XposedBridge.log(TAG + ": visitor LJZI hook failed: " + t);
-            }
-            // LJLLI(List) 最终设置数据：before 过滤入参兜底（BaseAdapter 最终列表）
-            try {
-                XposedHelpers.findAndHookMethod(ad, "LJLLI", List.class,
-                        new VisitorListFilter("visitor-LJLLI", 0));
-                ok++;
-            } catch (Throwable t) {
-                XposedBridge.log(TAG + ": visitor LJLLI hook failed: " + t);
-            }
+            // 40.8.0: LL(List,Map,boolean) 返回 List；41.3.0: LJLILLLLZI(List,Map,boolean) 返回 List
+            ok += hookByArity(ad, new String[]{"LJLILLLLZI", "LL"}, 3,
+                    new VisitorListFilter("visitor-convert", -1), "visitor-convert");
+            // 40.8.0: LJZI(List,Map,boolean) 入参；41.3.0: LJLIIL(List,Map,boolean) 入参
+            ok += hookByArity(ad, new String[]{"LJLIIL", "LJZI"}, 3,
+                    new VisitorListFilter("visitor-arg", 0), "visitor-arg");
+            // 最终设置数据兜底：40.8.0 LJLLI(List)；41.3.0 setData(List)/addData(List)
+            ok += hookByArity(ad, new String[]{"setData", "addData", "LJLLI"}, 1,
+                    new VisitorListFilter("visitor-setdata", 0), "visitor-setdata");
             XposedBridge.log(TAG + ": visitor hooks installed " + ok);
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": visitor hook setup failed: " + t);
@@ -4281,10 +4257,9 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> base = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.im.sdk.module.session.rips.list.BaseSessionListAdapter", cl);
-            XposedHelpers.findAndHookMethod(base, "LLD",
-                    List.class, boolean.class, new LldHook());
-            XposedHelpers.findAndHookMethod(base, "LJLLLLLL",
-                    List.class, new LjlHook());
+            // 40.8.0: LLD(List,boolean)/LJLLLLLL(List)；41.3.0: LJLILLLLZI(List,boolean)/setData(List)
+            hookFirst(base, new String[]{"LJLILLLLZI", "LLD"}, new Class[]{List.class, boolean.class}, new LldHook(), "session-ld");
+            hookFirst(base, new String[]{"setData", "justSetData", "LJLLLLLL"}, new Class[]{List.class}, new LjlHook(), "session-ljl");
             XposedBridge.log(TAG + ": session hooks installed");
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": session hook install failed: " + t);
@@ -4303,6 +4278,47 @@ public class MainHook implements IXposedHookLoadPackage {
         protected void beforeHookedMethod(MethodHookParam param) {
             filterList(param, 0, "session");
         }
+    }
+
+    /**
+     * 版本兼容辅助：按候选方法名顺序尝试 hook，第一个成功即返回。
+     * 用于应对抖音每版混淆方法名变化（如 LLD→LJLILLLLZI）。
+     */
+    private static int hookFirst(Class<?> cls, String[] names, Class<?>[] params,
+                                 XC_MethodHook hook, String label) {
+        for (String nm : names) {
+            try {
+                XposedHelpers.findAndHookMethod(cls, nm, params, hook);
+                XposedBridge.log(TAG + ": hookFirst " + label + " -> " + nm);
+                return 1;
+            } catch (Throwable ignored) {
+            }
+        }
+        XposedBridge.log(TAG + ": hookFirst " + label + " ALL FAILED ("
+                + java.util.Arrays.toString(names) + ")");
+        return 0;
+    }
+
+    /**
+     * 版本兼容辅助 2：按方法名 + 参数个数反射匹配（不校验参数类型）。
+     * 用于参数类型是短混淆类、findAndHookMethod 因 Class 不一致失败的场景。
+     */
+    private static int hookByArity(Class<?> cls, String[] names, int paramCount,
+                                   XC_MethodHook hook, String label) {
+        int n = 0;
+        for (java.lang.reflect.Method m : cls.getDeclaredMethods()) {
+            boolean nameOk = false;
+            for (String nm : names) if (nm.equals(m.getName())) { nameOk = true; break; }
+            if (!nameOk || m.getParameterTypes().length != paramCount) continue;
+            try {
+                XposedBridge.hookMethod(m, hook);
+                XposedBridge.log(TAG + ": hookByArity " + label + " -> " + m.getName());
+                n++;
+            } catch (Throwable ignored) {
+            }
+        }
+        if (n == 0) XposedBridge.log(TAG + ": hookByArity " + label + " NONE");
+        return n;
     }
 
     /** 通用列表 + 关注/粉丝/分享 的统一过滤。 */
@@ -4330,7 +4346,9 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> base = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.common.adapter.BaseAdapter", cl);
-            String[] methods = {"LJLLI", "LJLLLLLL", "LJLZ", "LJZ"};
+            // 40.8.0: LJLLI/LJLLLLLL/LJLZ/LJZ；41.3.0: setData/setDataAfterLoadMore/setDataAfterLoadLatest
+            String[] methods = {"setData", "setDataAfterLoadMore", "setDataAfterLoadLatest",
+                    "LJLLI", "LJLLLLLL", "LJLZ", "LJZ"};
             int ok = 0;
             for (String m : methods) {
                 try {
@@ -4338,10 +4356,9 @@ public class MainHook implements IXposedHookLoadPackage {
                             new GenericListHook("base-adapter:" + m));
                     ok++;
                 } catch (Throwable t) {
-                    XposedBridge.log(TAG + ": BaseAdapter." + m + " not found");
                 }
             }
-            XposedBridge.log(TAG + ": BaseAdapter hooks installed " + ok + "/4");
+            XposedBridge.log(TAG + ": BaseAdapter hooks installed " + ok + "/" + methods.length);
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": BaseAdapter hook failed: " + t);
         }
@@ -4487,10 +4504,9 @@ public class MainHook implements IXposedHookLoadPackage {
             for (String cn : vms) {
                 try {
                     Class<?> vm = XposedHelpers.findClass(cn, cl);
-                    XposedHelpers.findAndHookMethod(vm, "HA",
-                            List.class, folIt, boolean.class,
-                            new GenericListHook("following"));
-                    ok++;
+                    // 40.8.0 HA；41.3.0 MF(List,FollowingItemList,boolean)，按参数个数反射
+                    ok += hookByArity(vm, new String[]{"MF", "HA"}, 3,
+                            new GenericListHook("following"), "following-" + cn);
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + ": " + cn + " HA failed: " + t);
                 }
@@ -4500,8 +4516,9 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + ": following hooks failed: " + t);
         }
 
-        // 3) 粉丝列表（FollowerRelationViewModel 子类的 KA）
-        String jsName = DexClassMap.resolve("search_result_model", "X.10js");
+        // 3) 粉丝列表（FollowerRelationViewModel 子类的列表方法）
+        // 40.8.0 = KA(List,X.10js,boolean)；41.3.0 = OF(List,X.1P7u,boolean)
+        String jsName = DexClassMap.resolve("search_result_model", "X.1P7u");
         try {
             Class<?> js = XposedHelpers.findClass(jsName, cl);
             String[] vms = {
@@ -4512,17 +4529,15 @@ public class MainHook implements IXposedHookLoadPackage {
             for (String cn : vms) {
                 try {
                     Class<?> vm = XposedHelpers.findClass(cn, cl);
-                    XposedHelpers.findAndHookMethod(vm, "KA",
-                            List.class, js, boolean.class,
-                            new GenericListHook("follower"));
-                    ok++;
+                    // 按方法名+3参数反射 hook（规避短混淆参数类 Class 不一致）
+                    ok += hookByArity(vm, new String[]{"OF", "KA"}, 3,
+                            new GenericListHook("follower"), "follower-" + cn);
                 } catch (Throwable t) {
-                    XposedBridge.log(TAG + ": " + cn + " KA failed: " + t);
                 }
             }
-            XposedBridge.log(TAG + ": follower KA hooks installed " + ok + "/2");
+            XposedBridge.log(TAG + ": follower list hooks installed " + ok + "/2");
             DexClassMap.recordHook("search_result_model", "搜索结果模型(KA参数)",
-                    "X.10js", jsName, ok > 0, "KA(List," + jsName + ",boolean) x" + ok + "/2");
+                    "X.10js", jsName, ok > 0, "list(List," + jsName + ",boolean) x" + ok + "/2");
         } catch (Throwable t) {
             DexClassMap.recordHook("search_result_model", "搜索结果模型(KA参数)",
                     "X.10js", jsName, false, t.getClass().getSimpleName());
@@ -4551,8 +4566,9 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> vm = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.im.share.IMSharePanelViewModel", cl);
-            XposedHelpers.findAndHookMethod(vm, "IA", List.class,
-                    new GenericListHook("share"));
+            // 40.8.0 IA(List)；41.3.0 NF(List)
+            hookFirst(vm, new String[]{"NF", "IA"}, new Class[]{List.class},
+                    new GenericListHook("share"), "share-list");
             XposedBridge.log(TAG + ": share hook installed");
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": share hook failed: " + t);
@@ -4568,9 +4584,16 @@ public class MainHook implements IXposedHookLoadPackage {
             for (String cn : headAdapters) {
                 try {
                     Class<?> ad = XposedHelpers.findClass(cn, cl);
-                    XposedHelpers.findAndHookMethod(ad, "LJLLLLLL",
-                            List.class, boolean.class,
-                            new GenericListHook("share-head"));
+                    // 40.8.0 LJLLLLLL(List,boolean)；41.3.0 getData():List
+                    if (hookFirst(ad, new String[]{"LJLLLLLL"},
+                            new Class[]{List.class, boolean.class},
+                            new GenericListHook("share-head"), "share-head-arg") == 0) {
+                        try {
+                            XposedHelpers.findAndHookMethod(ad, "getData",
+                                    new ReturnListFilter("share-head-getData"));
+                        } catch (Throwable ignored) {
+                        }
+                    }
                     ok2++;
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + ": " + cn + " head failed: " + t);
@@ -4582,8 +4605,9 @@ public class MainHook implements IXposedHookLoadPackage {
         }
 
         // 7) 搜索状态层：X.0p04.LJ(String, List, X.0ozx) —— 搜索结果/默认页"更多聊天"数据
-        String srcName = DexClassMap.resolve("im_search_source", "X.0p04");
-        String loadName = DexClassMap.resolve("load_state", "X.0ozx");
+        // 41.3.0: X.0Zmq.LJ(String,List,X.0Zn0)，方法名 LJ 未变，仅类名变
+        String srcName = DexClassMap.resolve("im_search_source", "X.0Zmq");
+        String loadName = DexClassMap.resolve("load_state", "X.0Zn0");
         try {
             Class<?> state = XposedHelpers.findClass(srcName, cl);
             Class<?> ozx = XposedHelpers.findClass(loadName, cl);
@@ -4606,10 +4630,9 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> listAdapter = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.im.share.sharelist.IMShareContactsListAdapter", cl);
-            XposedHelpers.findAndHookMethod(listAdapter, "LLD", List.class,
-                    new GenericListHook("share-list"));
-            XposedHelpers.findAndHookMethod(listAdapter, "getData",
-                    new ReturnListFilter("share-list-getData", true));
+            // 40.8.0 LLD(List)；41.3.0 LJLLLL(List)/LJLJJI(List)
+            hookFirst(listAdapter, new String[]{"LJLLLL", "LJLJJI", "LLD"}, new Class[]{List.class},
+                    new GenericListHook("share-list"), "share-list");
             XposedBridge.log(TAG + ": share-list hooks installed");
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": share-list hook failed: " + t);
@@ -4619,8 +4642,10 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> vm2 = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.im.share.IMSharePanelViewModel", cl);
+            // 40.8.0 EA():List；41.3.0 IF():List
+            XposedHelpers.findAndHookMethod(vm2, "IF", new ReturnListFilter("share-vm-IF"));
             XposedHelpers.findAndHookMethod(vm2, "EA", new ReturnListFilter("share-vm-EA"));
-            XposedBridge.log(TAG + ": share-vm EA hook installed");
+            XposedBridge.log(TAG + ": share-vm list hook installed");
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": share-vm EA hook failed: " + t);
         }
@@ -4629,8 +4654,9 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> picker = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.im.picker.rips.list.content.PickerAdapter", cl);
-            XposedHelpers.findAndHookMethod(picker, "LLD",
-                    List.class, java.util.Map.class, new GenericListHook("picker"));
+            // 40.8.0 LLD(List,Map)；41.3.0 LJLJI(List,Map)
+            hookFirst(picker, new String[]{"LJLJI", "LLD"}, new Class[]{List.class, java.util.Map.class},
+                    new GenericListHook("picker"), "picker");
             XposedBridge.log(TAG + ": picker hook installed");
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": picker hook failed: " + t);
@@ -4640,15 +4666,11 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> od = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.feed.ui.masklayer2.OptionsDialogV2", cl);
-            for (String m : new String[]{"LJLLLLLL", "LJZI"}) {
-                try {
-                    XposedHelpers.findAndHookMethod(od, m, List.class,
-                            new GenericListHook("mask:" + m));
-                } catch (Throwable t) {
-                    XposedBridge.log(TAG + ": mask " + m + " failed: " + t);
-                }
-            }
-            XposedHelpers.findAndHookMethod(od, "LLFF", new ReturnListFilter("mask-getList"));
+            // 40.8.0 LJLLLLLL(List)；41.3.0 LJLL(List)
+            hookFirst(od, new String[]{"LJLL", "LJLLLLLL"}, new Class[]{List.class},
+                    new GenericListHook("mask-list"), "mask-list");
+            try { XposedHelpers.findAndHookMethod(od, "LJZI", new ReturnListFilter("mask-getList")); } catch (Throwable ignored) {}
+            try { XposedHelpers.findAndHookMethod(od, "LLFF", new ReturnListFilter("mask-getList")); } catch (Throwable ignored) {}
             XposedBridge.log(TAG + ": mask hooks installed");
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": mask hooks failed: " + t);
@@ -4659,17 +4681,14 @@ public class MainHook implements IXposedHookLoadPackage {
             Class<?> vm3 = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.mate.matelist.list.MateListDataVM", cl);
             Class<?> cont = XposedHelpers.findClass("kotlin.coroutines.Continuation", cl);
-            try {
-                XposedHelpers.findAndHookMethod(vm3, "MA",
-                        String.class, List.class, cont, new GenericListHook("mate", 1));
-            } catch (Throwable t) {
-                XposedBridge.log(TAG + ": mate MA failed: " + t);
-            }
-            for (String m : new String[]{"HA", "IA"}) {
+            // 40.8.0 MA(String,List,Continuation)；41.3.0 QF(String,List,Continuation)
+            hookFirst(vm3, new String[]{"QF", "MA"}, new Class[]{String.class, List.class, cont},
+                    new GenericListHook("mate", 1), "mate-load");
+            // 40.8.0 HA()/IA()；41.3.0 MF()/NF()（均无参返回 List）
+            for (String m : new String[]{"MF", "NF", "HA", "IA"}) {
                 try {
                     XposedHelpers.findAndHookMethod(vm3, m, new ReturnListFilter("mate-" + m));
                 } catch (Throwable t) {
-                    XposedBridge.log(TAG + ": mate " + m + " failed: " + t);
                 }
             }
             XposedBridge.log(TAG + ": mate hooks installed");
@@ -4677,15 +4696,15 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + ": mate hooks failed: " + t);
         }
 
-        // 13b) 互关页排序分组：MateListSimpleSortVM.HA(List, String, Map, X.07WK)
-        String wkName = DexClassMap.resolve("user_comparable", "X.07WK");
+        // 13b) 互关页排序分组：40.8.0 HA(List,String,Map,X.07WK)；41.3.0 MF(List,String,Map,X.06CG)
+        String wkName = DexClassMap.resolve("user_comparable", "X.06CG");
         try {
             Class<?> sortVm = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.mate.matelist.list.simplesort.MateListSimpleSortVM", cl);
             Class<?> wk = XposedHelpers.findClass(wkName, cl);
-            XposedHelpers.findAndHookMethod(sortVm, "HA",
-                    List.class, String.class, java.util.Map.class, wk,
-                    new GenericListHook("mate-sort", 0));
+            hookFirst(sortVm, new String[]{"MF", "HA"},
+                    new Class[]{List.class, String.class, java.util.Map.class, wk},
+                    new GenericListHook("mate-sort", 0), "mate-sort");
             XposedBridge.log(TAG + ": mate-sort hook installed");
             DexClassMap.recordHook("user_comparable", "用户排序比较器",
                     "X.07WK", wkName, true, "HA(List,String,Map," + wkName + ")");
@@ -4700,7 +4719,8 @@ public class MainHook implements IXposedHookLoadPackage {
             Class<?> vm = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.friends.viewmodel.RawFamiliarFriendsViewModel", cl);
             XC_MethodHook rec = new ViewModelListRecordHook();
-            for (String m : new String[]{"UA", "ZA"}) {
+            // 40.8.0 UA/ZA(List)；41.3.0 XF/aG(List)
+            for (String m : new String[]{"XF", "aG", "UA", "ZA"}) {
                 try {
                     XposedHelpers.findAndHookMethod(vm, m, List.class, rec);
                 } catch (Throwable ignored) {
@@ -4718,8 +4738,9 @@ public class MainHook implements IXposedHookLoadPackage {
                     "com.ss.android.ugc.aweme.im.sdk.relations.core.fetch.RelationFetchManager", cl);
             Class<?> resp = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.im.sdk.relations.core.fetch.model.RelationFetchResponse", cl);
-            XposedHelpers.findAndHookMethod(fm, "LJIILJJIL", long.class, resp,
-                    new RelationFetchHook());
+            // 40.8.0 LJIILJJIL(J,resp)；41.3.0 LJIILL(J,resp)
+            hookFirst(fm, new String[]{"LJIILL", "LJIILJJIL"}, new Class[]{long.class, resp},
+                    new RelationFetchHook(), "relation-fetch");
             XposedBridge.log(TAG + ": relation-fetch record hook installed");
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": relation-fetch record hook failed: " + t);
@@ -4729,21 +4750,25 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> ad = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.friends.adapter.RawFamiliarFriendsAdapter", cl);
-            XposedHelpers.findAndHookMethod(ad, "LJLLLLLL", List.class,
-                    new ViewModelListRecordHook());
+            // 40.8.0 LJLLLLLL(List)；41.3.0 setData(List)
+            hookFirst(ad, new String[]{"setData", "LJLLLLLL"}, new Class[]{List.class},
+                    new ViewModelListRecordHook(), "familiar-adapter");
             XposedBridge.log(TAG + ": familiar-adapter record hook installed");
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": familiar-adapter record hook failed: " + t);
         }
 
-        // 24h) 互关页观察者直达采集：X.10bM/N/O(页面) 与 X.10aV/W/X(行) 的 onChanged
+        // 24h) 好友/互关页观察者直达采集
+        // 40.8.0: X.10bM/N/O(页面) 与 X.10aV/W/X(行) 的 onChanged；
+        // 41.3.0: 改为 RawFamiliarFriendsFragment / MateUserActiveManager 的 lifecycle Observer。
         try {
             Class<?> obj = Object.class;
             XC_MethodHook rec = new ObserverChangedHook();
             String[][] targets = {
+                    {"com.ss.android.ugc.aweme.friends.ui.RawFamiliarFriendsFragment$sam$androidx_lifecycle_Observer$0", "onChanged"},
+                    {"com.ss.android.ugc.aweme.mate.matelist.data.MateUserActiveManager$sam$androidx_lifecycle_Observer$0", "onChanged"},
                     {"X.10bM", "onChanged"}, {"X.10bN", "onChanged"}, {"X.10bO", "onChanged"},
                     {"X.10aV", "onChanged"}, {"X.10aW", "onChanged"}, {"X.10aX", "onChanged"},
-                    {"X.10G2", "LIZ"},
             };
             int ok = 0;
             for (String[] t : targets) {
@@ -4755,33 +4780,11 @@ public class MainHook implements IXposedHookLoadPackage {
             }
             XposedBridge.log(TAG + ": observer-record hooks installed " + ok + "/" + targets.length);
             DexClassMap.recordHook("static:observer", "观察者采集(静态)",
-                    "X.10bM/N/O,10aV/W/X,10G2", "同左", ok > 0,
-                    "onChanged/LIZ x" + ok + "/" + targets.length);
+                    "X.10bM/N/O,10aV/W/X,10G2", "sam observers", ok > 0,
+                    "onChanged x" + ok + "/" + targets.length);
         } catch (Throwable t) {
             DexClassMap.recordHook("static:observer", "观察者采集(静态)",
-                    "X.10bM/N/O,10aV/W/X,10G2", "同左", false, t.getClass().getSimpleName());
-            XposedBridge.log(TAG + ": observer-record hooks failed: " + t);
-        }
-
-        // 24h) 互关页观察者直达采集：X.10bM/N/O(页面) 与 X.10aV/W/X(行) 的 onChanged
-        try {
-            Class<?> obj = Object.class;
-            XC_MethodHook rec = new ObserverChangedHook();
-            String[][] targets = {
-                    {"X.10bM", "onChanged"}, {"X.10bN", "onChanged"}, {"X.10bO", "onChanged"},
-                    {"X.10aV", "onChanged"}, {"X.10aW", "onChanged"}, {"X.10aX", "onChanged"},
-                    {"X.10G2", "LIZ"},
-            };
-            int ok = 0;
-            for (String[] t : targets) {
-                try {
-                    XposedHelpers.findAndHookMethod(t[0], cl, t[1], obj, rec);
-                    ok++;
-                } catch (Throwable ignored) {
-                }
-            }
-            XposedBridge.log(TAG + ": observer-record hooks installed " + ok + "/" + targets.length);
-        } catch (Throwable t) {
+                    "X.10bM/N/O,10aV/W/X,10G2", "sam observers", false, t.getClass().getSimpleName());
             XposedBridge.log(TAG + ": observer-record hooks failed: " + t);
         }
 
@@ -4881,24 +4884,20 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + ": ezlist-record hook failed: " + t);
         }
 
-        // 24b) 互关页数据层：MateListItemHolder.G3(item,int,List) 携带整份列表
+        // 24b) 互关页数据层：40.8.0 G3(item,int,List)；41.3.0 B3(06Eu,int,List)
         try {
             Class<?> holder = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.mate.matelist.list.ui.holder.MateListItemHolder", cl);
-            Class<?> wo = XposedHelpers.findClass("X.07WO", cl);
-            XposedHelpers.findAndHookMethod(holder, "G3",
-                    wo, int.class, List.class, new RecordListHook(0, 2));
-            try {
-                XposedHelpers.findAndHookMethod(holder, "onBind",
-                        Object.class, int.class, List.class, new RecordListHook(0, 2));
-            } catch (Throwable ignored) {
-            }
-            XposedBridge.log(TAG + ": mate-record hook installed");
+            int n = hookByArity(holder, new String[]{"B3", "G3"}, 3,
+                    new RecordListHook(0, 2), "mate-record");
+            hookByArity(holder, new String[]{"onBind"}, 3,
+                    new RecordListHook(0, 2), "mate-record-onbind");
+            XposedBridge.log(TAG + ": mate-record hook installed " + n);
             DexClassMap.recordHook("static:07WO", "互关记录项(静态)",
-                    "X.07WO", "X.07WO", true, "G3(X.07WO,int,List)");
+                    "X.07WO", "B3/G3", n > 0, "B3/G3(item,int,List) x" + n);
         } catch (Throwable t) {
             DexClassMap.recordHook("static:07WO", "互关记录项(静态)",
-                    "X.07WO", "X.07WO", false, t.getClass().getSimpleName());
+                    "X.07WO", "B3/G3", false, t.getClass().getSimpleName());
             XposedBridge.log(TAG + ": mate-record hook failed: " + t);
         }
 
