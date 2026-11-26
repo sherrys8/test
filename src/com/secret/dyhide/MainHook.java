@@ -4823,6 +4823,8 @@ public class MainHook implements IXposedHookLoadPackage {
         String[] searchAdapters = {
                 "com.ss.android.ugc.aweme.following.ui.adapter.FollowingSearchAdapter",
                 "com.ss.android.ugc.aweme.following.ui.adapter.CommonFollowingSearchAdapter",
+                "com.ss.android.ugc.aweme.following.FriendsSearchAdapter",
+                "com.ss.android.ugc.aweme.friends.adapter.FriendsSearchAdapter",
         };
         int searchRowOk = 0;
         for (String cn : searchAdapters) {
@@ -7581,6 +7583,11 @@ public class MainHook implements IXposedHookLoadPackage {
      */
     private static String resolveUid(Object item) {
         if (item == null) return null;
+        // v11.16：优先直接读模型里的 uid 字段。41.3.0 的 X.14NE 同时有
+        // uid/uniqueId/secUid 三个字符串，getter 顺序先拿到 uniqueId 时会导致
+        // 粉丝搜索漏过滤；按字段名直接取 uid 最稳。
+        String direct = declaredUid(item);
+        if (direct != null) return direct;
         String cn = item.getClass().getName();
         if (cn.contains("IMMember")) {
             String s = tryStr(item, new String[]{"LJIJJLI", "getUidS", "getUid", "getSingleId"});
@@ -7628,6 +7635,30 @@ public class MainHook implements IXposedHookLoadPackage {
 
     private static boolean isHiddenUid(String s) {
         return isRealUid(s) && uids.contains(s);
+    }
+
+    /** 直接按字段名读 uid/uidS/userId（兼容混淆类里保留的模型字段名）。 */
+    private static String declaredUid(Object item) {
+        try {
+            Class<?> c = item.getClass();
+            for (int depth = 0; depth < 4 && c != null && c != Object.class; depth++, c = c.getSuperclass()) {
+                java.lang.reflect.Field[] fs = c.getDeclaredFields();
+                for (java.lang.reflect.Field f : fs) {
+                    if (f.getType() != String.class) continue;
+                    String n = f.getName();
+                    if (!"uid".equals(n) && !"uidS".equals(n)
+                            && !"userId".equals(n) && !"userIdStr".equals(n)) continue;
+                    try {
+                        f.setAccessible(true);
+                        Object v = f.get(item);
+                        if (v instanceof String && isHiddenUid((String) v)) return (String) v;
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
     }
 
     /** 从白名单联系人对象取 uid（IMUser 先转 User，避免首字母 getter 误判）。 */
