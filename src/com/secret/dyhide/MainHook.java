@@ -2421,17 +2421,13 @@ public class MainHook implements IXposedHookLoadPackage {
                 if (!(param.thisObject instanceof android.view.View)) return;
                 android.view.View tv = (android.view.View) param.thisObject;
 
-                // v11.6 自动识别：把侧滑栏里出现的入口名登记到清单（不受名单/开关限制），
-                // 供面板勾选，免去手动输入。只在真正的侧滑栏 View 内登记。
-                int sk = sidebarKind(tv);
-                if (sk != 0 && text.length() <= 10 && !text.contains(" ")) {
-                    synchronized (discoveredSidebarEntries) {
-                        Integer prev = discoveredSidebarEntries.get(text);
-                        int mask = prev == null ? 0 : prev;
-                        int bit = sk == 1 ? 1 : (sk == 2 ? 2 : 0);
-                        if (bit != 0 && (mask & bit) == 0) {
-                            discoveredSidebarEntries.put(text, mask | bit);
-                        }
+                // v11.8 自动识别：把侧滑栏里出现的入口名登记到清单（不受名单/开关限制）。
+                // sidebarKind 依赖面板布局后的宽度，setText 时面板可能还没 measure，
+                // 因此先判是否在侧边栏，再 post 到布局完成后按几何位置登记左右侧。
+                if (text.length() <= 10 && !text.contains(" ") && isInSidebar(tv)) {
+                    try {
+                        tv.post(new SidebarDiscoverTask(tv, text));
+                    } catch (Throwable ignored) {
                     }
                 }
 
@@ -2445,27 +2441,40 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /**
-     * 判定 View 位于哪一种侧边栏：1=左滑侧边栏（右侧面板，含离线缓存等网格），
-     * 2=「我」页右滑侧边栏（纵向菜单，含观看历史等行），0=都不是。
-     * 注意 "profilesidebar.panel" 也包含 "sidebar.panel"，所以必须先判右滑。
-     */
-    private static int sidebarKind(android.view.View v) {
-        // 41.3.0：左右滑面板共用 sidebar.panel 模板且顶部都有 GridLayout，
-        // 旧「有无网格」判断会把右滑顶部网格入口（设置/扫一扫/钱包…）误判成左滑。
-        // 真机 chain 证据：
-        //   左滑：... GridLayout < CardModuleView < SideBarNestedScrollView < FrameLayout ...
-        //         （祖先链只有 1 个 SideBarNestedScrollView）
-        //   右滑：... CardModuleView < SideBarNestedScrollView < X.1KHY < ...
-        //         < SideBarNestedScrollView < FrameLayout ...（有 2 个，嵌套）
-        // 因此用祖先链 SideBarNestedScrollView 层数区分：>=2 = 右滑，1 = 左滑。
-        int nsvCount = 0;
-        boolean inSidebar = false;
+    /** v11.8：布局后登记一个侧滑栏入口（具名类规避 D8 匿名类 NPE） */
+    private static class SidebarDiscoverTask implements Runnable {
+        private final android.view.View view;
+        private final String name;
+
+        SidebarDiscoverTask(android.view.View view, String name) {
+            this.view = view;
+            this.name = name;
+        }
+
+        @Override
+        public void run() {
+            try {
+                int sk = sidebarKind(view);
+                if (sk == 0) return;
+                synchronized (discoveredSidebarEntries) {
+                    Integer prev = discoveredSidebarEntries.get(name);
+                    int mask = prev == null ? 0 : prev;
+                    int bit = sk == 1 ? 1 : (sk == 2 ? 2 : 0);
+                    if (bit != 0 && (mask & bit) == 0) {
+                        discoveredSidebarEntries.put(name, mask | bit);
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /** 祖先链中是否存在 SideBar/sidebar 容器（不依赖布局，可在 setText 时判断） */
+    private static boolean isInSidebar(android.view.View v) {
         android.view.View cur = v;
-        for (int i = 0; i < 16 && cur != null; i++) {
+        for (int i = 0; i < 30 && cur != null; i++) {
             String cn = cur.getClass().getName();
-            if (cn.contains("SideBar") || cn.contains("sidebar")) inSidebar = true;
-            if (cn.contains("SideBarNestedScrollView")) nsvCount++;
+            if (cn.contains("SideBar") || cn.contains("sidebar")) return true;
             try {
                 android.view.ViewParent p = cur.getParent();
                 if (!(p instanceof android.view.View)) break;
@@ -2474,8 +2483,48 @@ public class MainHook implements IXposedHookLoadPackage {
                 break;
             }
         }
-        if (!inSidebar) return 0;
-        return nsvCount >= 2 ? 2 : 1;
+        return false;
+    }
+
+    /**
+     * 判定 View 位于哪一种侧边栏：1=左滑侧边栏（右侧面板），2=右滑侧边栏（左侧「我」页面板），0=都不是。
+     *
+     * v11.8：41.3.0 两个面板都会嵌套 SideBarNestedScrollView，层数不能稳定区分左右
+     * （实测「我」页面板 1 层、首页右侧面板 2 层，旧规则正好判反）。改用面板几何位置：
+     * 取祖先链最外层 SideBarNestedScrollView 在屏幕上的水平中心，偏右=左滑面板(1)，
+     * 偏左=右滑面板(2)。该判据与入口在网格/纵向列表、顶部/底部无关。
+     */
+    private static int sidebarKind(android.view.View v) {
+        boolean inSidebar = false;
+        android.view.View outer = null;
+        android.view.View cur = v;
+        for (int i = 0; i < 30 && cur != null; i++) {
+            String cn = cur.getClass().getName();
+            if (cn.contains("SideBar") || cn.contains("sidebar")) inSidebar = true;
+            // 持续覆盖：循环结束时保留的是最外层（最靠近根）的那个
+            if (cn.contains("SideBarNestedScrollView")) outer = cur;
+            try {
+                android.view.ViewParent p = cur.getParent();
+                if (!(p instanceof android.view.View)) break;
+                cur = (android.view.View) p;
+            } catch (Throwable t) {
+                break;
+            }
+        }
+        if (!inSidebar || outer == null) return 0;
+        try {
+            int sw = v.getResources().getDisplayMetrics().widthPixels;
+            int[] loc = new int[2];
+            outer.getLocationOnScreen(loc);
+            int ow = outer.getWidth();
+            if (ow <= 0) ow = outer.getRight() - outer.getLeft();
+            if (sw <= 0 || ow <= 0) return 0;
+            int center = loc[0] + ow / 2;
+            if (center > sw / 2) return 1;  // 面板贴右：左滑侧滑栏
+            if (center < sw / 2) return 2;  // 面板贴左：右滑侧滑栏
+        } catch (Throwable ignored) {
+        }
+        return 0;
     }
 
     /** 子树中是否存在「入口网格」（子项 >= 6 的 GridLayout） */
@@ -2583,7 +2632,7 @@ public class MainHook implements IXposedHookLoadPackage {
         @Override
         public void run() {
             try {
-                if (!enabled || !sidebarHideEnabled) return;
+                if (!enabled) return;
                 if (gl.getChildCount() <= 0) return;
                 relayoutGrid(gl, cols);
             } catch (Throwable ignored) {
@@ -2606,7 +2655,8 @@ public class MainHook implements IXposedHookLoadPackage {
         public void run() {
             try {
                 if (!enabled) return;
-                int kind = sidebarKind(tv);
+                int geomKind = sidebarKind(tv);
+                int kind = geomKind;
                 try {
                     if ("观看历史".equals(name) && PROBE2.add(name + kind)) {
                         StringBuilder pc = new StringBuilder();
@@ -2630,20 +2680,21 @@ public class MainHook implements IXposedHookLoadPackage {
                     }
                 } catch (Throwable ignored) {
                 }
-                // 41.3.0：右滑面板顶部网格与纵向列表 ScrollView 深度不同，几何 kind
-                // 对顶部网格会误判（"设置/更多功能"被判成左滑）。改用「名单优先」：
-                // 只看名字在哪份名单里；几何 kind 仅在两份名单都命中时作仲裁。
+                // v11.8：名单归属 + 实际面板双重校验。名字只在左名单时，只允许隐藏
+                // 左滑面板（贴右）里的实例；右面板里的同名项必须保留，反之亦然。
                 boolean inLeft = sidebarHideEnabled && sidebarHideNames != null
                         && sidebarHideNames.contains(name);
                 boolean inRight = sidebarHideRightEnabled && sidebarHideRightNames != null
                         && sidebarHideRightNames.contains(name);
                 if (inLeft && !inRight) {
+                    if (geomKind != 0 && geomKind != 1) return; // 当前项在右面板，跳过
                     kind = 1;
                 } else if (inRight && !inLeft) {
+                    if (geomKind != 0 && geomKind != 2) return; // 当前项在左面板，跳过
                     kind = 2;
                 } else if (inLeft && inRight) {
-                    // 两边都勾选：按几何位置决定（kind 已由 sidebarKind 算出）
-                    if (kind == 0) kind = 1;
+                    // 两边名单都有：按当前实例实际所在面板处理
+                    kind = geomKind != 0 ? geomKind : 1;
                 } else {
                     return; // 不在任何名单
                 }
@@ -2701,58 +2752,34 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** 布局完成后纠正侧边栏网格：把名单里的入口重新移除并补位 */
+    /** 布局完成后纠正侧边栏网格：把对应名单里的入口重新移除并补位（左右面板都处理） */
     private static class GridLayoutFixHook extends XC_MethodHook {
         @Override
         protected void afterHookedMethod(MethodHookParam param) {
             try {
-                if (!enabled || !sidebarHideEnabled) return;
-                if (sidebarHideNames == null || sidebarHideNames.isEmpty()) return;
+                if (!enabled) return;
                 Object o = param.thisObject;
                 if (!(o instanceof android.widget.GridLayout)) return;
                 android.widget.GridLayout gl = (android.widget.GridLayout) o;
-                boolean known;
+                int kind = sidebarKind(gl);
+                if (kind == 0) return;
+                Set<String> active = kind == 2 ? sidebarHideRightNames : sidebarHideNames;
+                boolean on = kind == 2 ? sidebarHideRightEnabled : sidebarHideEnabled;
+                if (!on || active == null || active.isEmpty()) return;
                 synchronized (SIDEBAR_GRIDS) {
-                    known = SIDEBAR_GRIDS.contains(gl);
+                    SIDEBAR_GRIDS.add(gl);
                 }
-                if (!known) {
-                    if (!isLeftSidebarGrid(gl)) return;
-                    synchronized (SIDEBAR_GRIDS) {
-                        SIDEBAR_GRIDS.add(gl);
-                    }
-                }
-                applyGridHides(gl);
+                applyGridHides(gl, kind);
             } catch (Throwable ignored) {
             }
         }
     }
 
-    /** 网格是否位于左滑侧边栏内（右滑面板顶部也有网格，必须用层数排除） */
-    private static boolean isLeftSidebarGrid(android.view.View v) {
-        int nsvCount = 0;
-        boolean inSidebar = false;
-        android.view.View cur = v;
-        for (int i = 0; i < 16 && cur != null; i++) {
-            String cn = cur.getClass().getName();
-            if (cn.contains("SideBar") || cn.contains("sidebar")) inSidebar = true;
-            if (cn.contains("SideBarNestedScrollView")) nsvCount++;
-            try {
-                android.view.ViewParent p = cur.getParent();
-                if (!(p instanceof android.view.View)) break;
-                cur = (android.view.View) p;
-            } catch (Throwable t) {
-                break;
-            }
-        }
-        if (!inSidebar) return false;
-        // 右滑面板的 SideBarNestedScrollView 嵌套 2 层；左滑只有 1 层
-        return nsvCount < 2;
-    }
-
-    /** 从网格中移除名单里的项，并按原列数重排 */
-    private static void applyGridHides(android.widget.GridLayout gl) {
+    /** 从网格中移除对应名单里的项，并按原列数重排 */
+    private static void applyGridHides(android.widget.GridLayout gl, int kind) {
         try {
-            if (sidebarHideNames == null || sidebarHideNames.isEmpty()) return;
+            Set<String> active = kind == 2 ? sidebarHideRightNames : sidebarHideNames;
+            if (active == null || active.isEmpty()) return;
             java.util.List<android.view.View> del = new java.util.ArrayList<>();
             int n = gl.getChildCount();
             for (int i = 0; i < n; i++) {
@@ -2760,7 +2787,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 String nm = entryNameOf(c);
                 if (nm == null) continue;
                 nm = nm.trim();
-                if (sidebarHideNames.contains(nm)) del.add(c);
+                if (active.contains(nm)) del.add(c);
             }
             if (del.isEmpty()) return;
             int cols = detectColumns(gl);
