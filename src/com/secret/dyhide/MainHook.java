@@ -150,9 +150,9 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile boolean menuWatchHistoryHidden = false;
     /** 侧边栏入口自定义删除：总开关。 */
     private static volatile boolean sidebarHideEnabled = false;
-    /** 左滑侧边栏要删除的入口名称名单（用户自定义，默认空）。 */
+    /** 左侧「我」页 ProfileSideBar 要删除的入口名称名单（用户自定义，默认空）。 */
     private static volatile Set<String> sidebarHideNames = new HashSet<>();
-    /** 右滑侧边栏自定义删除：开关 + 名单。 */
+    /** 右侧首页 HomeSideBar 自定义删除：开关 + 名单。 */
     private static volatile boolean sidebarHideRightEnabled = false;
     private static volatile Set<String> sidebarHideRightNames = new HashSet<>();
     /** 已 GONE 的菜单项 → {原visibility, name, kind}（关闭开关/名单差异更新时恢复）。 */
@@ -2428,20 +2428,24 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * 判定 View 位于哪一种侧边栏：1=左滑侧边栏（右侧面板），2=右滑侧边栏（左侧「我」页面板），0=都不是。
+     * 判定 View 位于哪一种侧边栏：1=左侧「我」页 ProfileSideBar，2=右侧首页 HomeSideBar，0=都不是。
      *
-     * v11.8：41.3.0 两个面板都会嵌套 SideBarNestedScrollView，层数不能稳定区分左右
-     * （实测「我」页面板 1 层、首页右侧面板 2 层，旧规则正好判反）。改用面板几何位置：
-     * 取祖先链最外层 SideBarNestedScrollView 在屏幕上的水平中心，偏右=左滑面板(1)，
-     * 偏左=右滑面板(2)。该判据与入口在网格/纵向列表、顶部/底部无关。
+     * v11.10：dexsql 查 41.3.0 APK 确认两套面板有独立容器类：
+     *   - 左侧「我」页：com.ss.android.ugc.aweme.sidebar.profilesidebar.panel.ui.ProfileSideBarFrameLayout
+     *                   / ProfileSideBarNestedScrollView
+     *   - 右侧首页：  com.ss.android.ugc.aweme.sidebar.panel.ui.SideBarNestedScrollView
+     * 因此优先按祖先类名区分，不再依赖 ScrollView 层数或屏幕几何（两者都会被布局结构影响）。
+     * 类名信息缺失时再用面板水平中心兜底：偏左=左侧(1)，偏右=右侧(2)。
      */
     private static int sidebarKind(android.view.View v) {
-        boolean inSidebar = false;
+        boolean isProfile = false;
+        boolean isSidebar = false;
         android.view.View outer = null;
         android.view.View cur = v;
         for (int i = 0; i < 30 && cur != null; i++) {
             String cn = cur.getClass().getName();
-            if (cn.contains("SideBar") || cn.contains("sidebar")) inSidebar = true;
+            if (cn.contains("ProfileSideBar") || cn.contains("profilesidebar")) isProfile = true;
+            if (cn.contains("SideBar") || cn.contains("sidebar")) isSidebar = true;
             // 持续覆盖：循环结束时保留的是最外层（最靠近根）的那个
             if (cn.contains("SideBarNestedScrollView")) outer = cur;
             try {
@@ -2452,18 +2456,23 @@ public class MainHook implements IXposedHookLoadPackage {
                 break;
             }
         }
-        if (!inSidebar || outer == null) return 0;
-        try {
-            int sw = v.getResources().getDisplayMetrics().widthPixels;
-            int[] loc = new int[2];
-            outer.getLocationOnScreen(loc);
-            int ow = outer.getWidth();
-            if (ow <= 0) ow = outer.getRight() - outer.getLeft();
-            if (sw <= 0 || ow <= 0) return 0;
-            int center = loc[0] + ow / 2;
-            if (center > sw / 2) return 1;  // 面板贴右：左滑侧滑栏
-            if (center < sw / 2) return 2;  // 面板贴左：右滑侧滑栏
-        } catch (Throwable ignored) {
+        if (isProfile) return 1;   // 左侧「我」页 ProfileSideBar
+        if (isSidebar) return 2;   // 右侧首页 HomeSideBar
+        // 兜底：类名被混淆/改名时用面板几何位置
+        if (outer != null) {
+            try {
+                int sw = v.getResources().getDisplayMetrics().widthPixels;
+                int[] loc = new int[2];
+                outer.getLocationOnScreen(loc);
+                int ow = outer.getWidth();
+                if (ow <= 0) ow = outer.getRight() - outer.getLeft();
+                if (sw > 0 && ow > 0) {
+                    int center = loc[0] + ow / 2;
+                    if (center < sw / 2) return 1;
+                    if (center > sw / 2) return 2;
+                }
+            } catch (Throwable ignored) {
+            }
         }
         return 0;
     }
@@ -2621,21 +2630,22 @@ public class MainHook implements IXposedHookLoadPackage {
                     }
                 } catch (Throwable ignored) {
                 }
-                // v11.8：名单归属 + 实际面板双重校验。名字只在左名单时，只允许隐藏
-                // 左滑面板（贴右）里的实例；右面板里的同名项必须保留，反之亦然。
+                // v11.10：只处理真正位于侧滑栏里的 View。名单编辑器自身的行文本
+                // 也会触发 setText，如果这里不先排除，会被当成侧滑栏入口 GONE 掉，
+                // 表现为「弹窗里名单空白」。
+                if (geomKind == 0) return;
                 boolean inLeft = sidebarHideEnabled && sidebarHideNames != null
                         && sidebarHideNames.contains(name);
                 boolean inRight = sidebarHideRightEnabled && sidebarHideRightNames != null
                         && sidebarHideRightNames.contains(name);
                 if (inLeft && !inRight) {
-                    if (geomKind != 0 && geomKind != 1) return; // 当前项在右面板，跳过
+                    if (geomKind != 1) return; // 当前项在右侧面板，跳过
                     kind = 1;
                 } else if (inRight && !inLeft) {
-                    if (geomKind != 0 && geomKind != 2) return; // 当前项在左面板，跳过
+                    if (geomKind != 2) return; // 当前项在左侧面板，跳过
                     kind = 2;
                 } else if (inLeft && inRight) {
-                    // 两边名单都有：按当前实例实际所在面板处理
-                    kind = geomKind != 0 ? geomKind : 1;
+                    kind = geomKind;
                 } else {
                     return; // 不在任何名单
                 }

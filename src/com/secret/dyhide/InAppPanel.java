@@ -165,20 +165,20 @@ public class InAppPanel {
                     card.addView(restoreBlock(ctx, d, boxes, master, count));
                 } else if ("侧边栏".equals(groupName)) {
                     card.addView(sidebarBlock(ctx, d,
-                            "自定义删除左滑侧滑栏入口",
-                            "按名单删除左滑侧滑栏中的入口项",
+                            "自定义删除左侧侧滑栏入口",
+                            "按名单删除左侧「我」页侧滑栏中的入口项",
                             MainHook.isSidebarHideEnabled(),
                             new SidebarSwitchListener(),
                             MainHook.getSidebarHideNameList(),
-                            "编辑左滑侧滑栏名单…", 0));
+                            "编辑左侧侧滑栏名单…", 0));
                     card.addView(divider(ctx, d, dp(d, 14)));
                     card.addView(sidebarBlock(ctx, d,
-                            "自定义删除右滑侧滑栏入口",
-                            "按名单删除「我」页右滑侧滑栏中的入口项",
+                            "自定义删除右侧侧滑栏入口",
+                            "按名单删除右侧首页侧滑栏中的入口项",
                             MainHook.isSidebarHideRightEnabled(),
                             new SidebarRightSwitchListener(),
                             MainHook.getSidebarHideRightNameList(),
-                            "编辑右滑侧滑栏名单…", 1));
+                            "编辑右侧侧滑栏名单…", 1));
                 } else {
                     String[] keys = FACE_GROUPS[g][1].split(",");
                     int total = 0;
@@ -1101,8 +1101,8 @@ public class InAppPanel {
             barLp.rightMargin = dp(d, 8);
             head.addView(bar, barLp);
             TextView title = new TextView(ctx);
-            title.setText(kind == 1 ? "右滑侧滑栏删除名单"
-                    : (kind == 2 ? "「我」页入口条删除名单" : "左滑侧滑栏删除名单"));
+            title.setText(kind == 1 ? "右侧侧滑栏删除名单"
+                    : (kind == 2 ? "「我」页入口条删除名单" : "左侧侧滑栏删除名单"));
             title.setTextSize(16);
             title.setTypeface(Typeface.DEFAULT_BOLD);
             title.setTextColor(C_TITLE);
@@ -1110,10 +1110,10 @@ public class InAppPanel {
             box.addView(head);
 
             TextView hint = new TextView(ctx);
-            hint.setText("输入入口名称后点「添加」；改动保存后即时生效，无需重启");
+            hint.setText("输入入口名称后点「添加」，与侧边栏显示的文字一致即可");
             hint.setTextSize(11);
             hint.setTextColor(C_SUB);
-            hint.setPadding(0, dp(d, 6), 0, dp(d, 8));
+            hint.setPadding(0, dp(d, 6), 0, dp(d, 12));
             box.addView(hint);
 
             // 输入行
@@ -1153,16 +1153,23 @@ public class InAppPanel {
             add.setOnClickListener(new NameAddListener(this));
             box.addView(inputRow);
 
-            // 条目列表：整块内容由外层 ScrollView 统一滚动，入口较多时也能上下滑动
+            // 条目列表
+            ScrollView sc = new ScrollView(ctx);
+            sc.setVerticalScrollBarEnabled(false);
             listBox = new LinearLayout(ctx);
             listBox.setOrientation(LinearLayout.VERTICAL);
             listBox.setPadding(0, dp(d, 10), 0, 0);
-            box.addView(listBox);
+            sc.addView(listBox);
+            LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0);
+            slp.weight = 1f;
+            slp.topMargin = dp(d, 4);
+            box.addView(sc, slp);
 
-            // 底部按钮（固定在滚动区外，始终可点）
+            // 底部按钮
             LinearLayout btns = new LinearLayout(ctx);
             btns.setOrientation(LinearLayout.HORIZONTAL);
-            btns.setPadding(dp(d, 20), dp(d, 10), dp(d, 20), dp(d, 2));
+            btns.setPadding(0, dp(d, 12), 0, 0);
 
             TextView cancel = new TextView(ctx);
             cancel.setText("取消");
@@ -1196,24 +1203,9 @@ public class InAppPanel {
             svlp.leftMargin = dp(d, 6);
             btns.addView(save, svlp);
             save.setOnClickListener(new NameSaveListener(this));
+            box.addView(btns);
 
-            // 标题/提示/输入行/名单全部放进同一个 ScrollView，
-            // 只有底部按钮固定，条目多时可完整上下滑动。
-            ScrollView outer = new ScrollView(ctx);
-            outer.setVerticalScrollBarEnabled(false);
-            outer.setFillViewport(true);
-            outer.addView(box, new ScrollView.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT));
-            LinearLayout root = new LinearLayout(ctx);
-            root.setOrientation(LinearLayout.VERTICAL);
-            root.addView(outer, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-            root.addView(btns, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT));
-
-            dlg = new AlertDialog.Builder(ctx).setView(root).create();
+            dlg = new AlertDialog.Builder(ctx).setView(box).create();
             refreshList();
         }
 
@@ -1222,7 +1214,7 @@ public class InAppPanel {
             try {
                 android.util.DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
                 dlg.getWindow().setLayout((int) (dm.widthPixels * 0.86f),
-                        (int) (dm.heightPixels * 0.78f));
+                        (int) (dm.heightPixels * 0.55f));
                 GradientDrawable wbg = new GradientDrawable();
                 wbg.setColor(0xFFFFFFFF);
                 wbg.setCornerRadius(dp(d, 20));
