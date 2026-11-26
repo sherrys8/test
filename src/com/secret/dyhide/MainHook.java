@@ -122,6 +122,10 @@ public class MainHook implements IXposedHookLoadPackage {
     /** v12：逐个隐藏——hook 扫描到的入口清单（标识 id:xxx / type:x → 显示名），供面板勾选 */
     private static final java.util.LinkedHashMap<String, String> discoveredProfileEntries =
             new java.util.LinkedHashMap<String, String>();
+    /** v11.6：侧滑栏自动识别——打开左滑/右滑面板时登记发现的入口名，供面板勾选。
+     *  value = 首次发现的面板类型（1=左滑 2=右滑，0=未确定/两侧都有）。 */
+    private static final java.util.LinkedHashMap<String, Integer> discoveredSidebarEntries =
+            new java.util.LinkedHashMap<String, Integer>();
     /** 隐藏个人主页标签（作品/日常/收藏/喜欢/去过）：开关 + 名单（标识 tab:<type>）。 */
     private static volatile boolean profileTabEnabled = false;
     private static volatile Set<String> profileTabNames = new HashSet<>();
@@ -155,10 +159,10 @@ public class MainHook implements IXposedHookLoadPackage {
     /** 右滑侧边栏自定义删除：开关 + 名单。 */
     private static volatile boolean sidebarHideRightEnabled = false;
     private static volatile Set<String> sidebarHideRightNames = new HashSet<>();
-    /** 已隐藏的菜单项 → 原 visibility（关闭开关时恢复）。 */
-    private static final java.util.Map<android.view.View, int[]> SIDEBAR_HIDDEN =
+    /** 已 GONE 的菜单项 → {原visibility, name, kind}（关闭开关/名单差异更新时恢复）。 */
+    private static final java.util.Map<android.view.View, Object[]> SIDEBAR_HIDDEN =
             java.util.Collections.synchronizedMap(
-                    new java.util.WeakHashMap<android.view.View, int[]>());
+                    new java.util.WeakHashMap<android.view.View, Object[]>());
     private static final java.util.Set<String> PROBE2 =
             java.util.Collections.newSetFromMap(
                     new java.util.WeakHashMap<String, Boolean>());
@@ -2417,6 +2421,18 @@ public class MainHook implements IXposedHookLoadPackage {
                 if (!(param.thisObject instanceof android.view.View)) return;
                 android.view.View tv = (android.view.View) param.thisObject;
 
+                // v11.6 自动识别：把侧滑栏里出现的入口名登记到清单（不受名单/开关限制），
+                // 供面板勾选，免去手动输入。只在真正的侧滑栏 View 内登记。
+                int sk = sidebarKind(tv);
+                if (sk != 0 && text.length() <= 10 && !text.contains(" ")) {
+                    synchronized (discoveredSidebarEntries) {
+                        Integer prev = discoveredSidebarEntries.get(text);
+                        if (prev == null || (prev == 2 && sk == 1)) {
+                            discoveredSidebarEntries.put(text, sk);
+                        }
+                    }
+                }
+
                 boolean maybe = "观看历史".equals(text)
                         || (sidebarHideEnabled && sidebarHideNames.contains(text))
                         || (sidebarHideRightEnabled && sidebarHideRightNames.contains(text));
@@ -2433,19 +2449,21 @@ public class MainHook implements IXposedHookLoadPackage {
      * 注意 "profilesidebar.panel" 也包含 "sidebar.panel"，所以必须先判右滑。
      */
     private static int sidebarKind(android.view.View v) {
-        // 先确认确实在侧边栏体系内
-        android.view.View side = null;
-        android.view.View cur = v;
+        // 41.3.0：左右滑面板共用 sidebar.panel 模板且顶部都有 GridLayout，
+        // 旧「有无网格」判断会把右滑顶部网格入口（设置/扫一扫/钱包…）误判成左滑。
+        // 真机 chain 证据：
+        //   左滑：... GridLayout < CardModuleView < SideBarNestedScrollView < FrameLayout ...
+        //         （祖先链只有 1 个 SideBarNestedScrollView）
+        //   右滑：... CardModuleView < SideBarNestedScrollView < X.1KHY < ...
+        //         < SideBarNestedScrollView < FrameLayout ...（有 2 个，嵌套）
+        // 因此用祖先链 SideBarNestedScrollView 层数区分：>=2 = 右滑，1 = 左滑。
+        int nsvCount = 0;
         boolean inSidebar = false;
-        for (int i = 0; i < 12 && cur != null; i++) {
+        android.view.View cur = v;
+        for (int i = 0; i < 16 && cur != null; i++) {
             String cn = cur.getClass().getName();
-            if (cn.contains("SideBar") || cn.contains("sidebar")) {
-                inSidebar = true;
-            }
-            if (cn.contains("SideBarNestedScrollView") || cn.contains("SideBarPanel")) {
-                side = cur;
-                break;
-            }
+            if (cn.contains("SideBar") || cn.contains("sidebar")) inSidebar = true;
+            if (cn.contains("SideBarNestedScrollView")) nsvCount++;
             try {
                 android.view.ViewParent p = cur.getParent();
                 if (!(p instanceof android.view.View)) break;
@@ -2455,10 +2473,7 @@ public class MainHook implements IXposedHookLoadPackage {
             }
         }
         if (!inSidebar) return 0;
-        // 两个面板共用 sidebar.panel 模板，用「面板里是否有网格」区分：
-        // 有网格 = 左滑侧边栏（右侧抽屉，含离线缓存等入口），无网格 = 右滑侧边栏（纵向列表）
-        android.view.View scope = side != null ? side : v.getRootView();
-        return containsGrid(scope, 0) ? 1 : 2;
+        return nsvCount >= 2 ? 2 : 1;
     }
 
     /** 子树中是否存在「入口网格」（子项 >= 6 的 GridLayout） */
@@ -2613,17 +2628,22 @@ public class MainHook implements IXposedHookLoadPackage {
                     }
                 } catch (Throwable ignored) {
                 }
-                if (kind == 1) {
-                    // 左滑侧边栏：只用左滑名单
-                    if (!sidebarHideEnabled) return;
-                    if (sidebarHideNames == null || !sidebarHideNames.contains(name)) return;
-                } else if (kind == 2) {
-                    // 右滑侧边栏：只用右滑名单
-                    if (!sidebarHideRightEnabled) return;
-                    if (sidebarHideRightNames == null
-                            || !sidebarHideRightNames.contains(name)) return;
+                // 41.3.0：右滑面板顶部网格与纵向列表 ScrollView 深度不同，几何 kind
+                // 对顶部网格会误判（"设置/更多功能"被判成左滑）。改用「名单优先」：
+                // 只看名字在哪份名单里；几何 kind 仅在两份名单都命中时作仲裁。
+                boolean inLeft = sidebarHideEnabled && sidebarHideNames != null
+                        && sidebarHideNames.contains(name);
+                boolean inRight = sidebarHideRightEnabled && sidebarHideRightNames != null
+                        && sidebarHideRightNames.contains(name);
+                if (inLeft && !inRight) {
+                    kind = 1;
+                } else if (inRight && !inLeft) {
+                    kind = 2;
+                } else if (inLeft && inRight) {
+                    // 两边都勾选：按几何位置决定（kind 已由 sidebarKind 算出）
+                    if (kind == 0) kind = 1;
                 } else {
-                    return;
+                    return; // 不在任何名单
                 }
                 float d = tv.getResources().getDisplayMetrics().density;
                 android.view.View target = null;
@@ -2645,13 +2665,25 @@ public class MainHook implements IXposedHookLoadPackage {
                 if (target == null) return;
 
                 String result;
-                if (kind == 1) {
-                    result = removeFromGrid(target);
+                // 41.3.0：左滑和右滑面板顶部都有 GridLayout 网格入口（设置/扫一扫/钱包…）。
+                // 隐藏方式取决于「target 的直接父容器」，而不是面板左右：
+                //   网格里的项必须 removeFromGrid（GONE 会留空且不补位）；
+                //   纵向列表项才用 GONE。kind 仍用于名单归属判断（上面已按名单匹配过）。
+                android.view.ViewParent vp = target.getParent();
+                boolean inGrid = vp instanceof android.widget.GridLayout;
+                if (inGrid) {
+                    result = removeFromGrid(target, name);
+                    // 补记正确的 kind（removeFromGrid 默认写 1）
+                    synchronized (SIDEBAR_REMOVED) {
+                        Object[] rec = SIDEBAR_REMOVED.get(target);
+                        if (rec != null && rec.length >= 5) rec[4] = kind;
+                    }
                 } else {
                     result = "gone";
                     if (target.getVisibility() != android.view.View.GONE) {
                         synchronized (SIDEBAR_HIDDEN) {
-                            SIDEBAR_HIDDEN.put(target, new int[]{target.getVisibility()});
+                            SIDEBAR_HIDDEN.put(target,
+                                    new Object[]{target.getVisibility(), name, kind});
                         }
                         target.setVisibility(android.view.View.GONE);
                     }
@@ -2693,12 +2725,15 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** 网格是否位于左滑侧边栏内（且不是「我」页右滑侧边栏） */
+    /** 网格是否位于左滑侧边栏内（右滑面板顶部也有网格，必须用层数排除） */
     private static boolean isLeftSidebarGrid(android.view.View v) {
-        StringBuilder sb = new StringBuilder();
+        int nsvCount = 0;
+        boolean inSidebar = false;
         android.view.View cur = v;
-        for (int i = 0; i < 10 && cur != null; i++) {
-            sb.append(cur.getClass().getName()).append('|');
+        for (int i = 0; i < 16 && cur != null; i++) {
+            String cn = cur.getClass().getName();
+            if (cn.contains("SideBar") || cn.contains("sidebar")) inSidebar = true;
+            if (cn.contains("SideBarNestedScrollView")) nsvCount++;
             try {
                 android.view.ViewParent p = cur.getParent();
                 if (!(p instanceof android.view.View)) break;
@@ -2707,9 +2742,9 @@ public class MainHook implements IXposedHookLoadPackage {
                 break;
             }
         }
-        String c = sb.toString().toLowerCase(java.util.Locale.ROOT);
-        if (c.contains("profilesidebar")) return false;
-        return c.contains("sidebar.panel") || c.contains("sidebarnestedscrollview");
+        if (!inSidebar) return false;
+        // 右滑面板的 SideBarNestedScrollView 嵌套 2 层；左滑只有 1 层
+        return nsvCount < 2;
     }
 
     /** 从网格中移除名单里的项，并按原列数重排 */
@@ -2744,8 +2779,8 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** 从网格容器移除一项并重排补位；非网格容器退化为 GONE */
-    private static String removeFromGrid(android.view.View target) {
+    /** 从网格容器移除一项并重排补位；非网格容器退化为 GONE。name 用于名单差异更新。 */
+    private static String removeFromGrid(android.view.View target, String name) {
         try {
             android.view.ViewParent vp = target.getParent();
             if (!(vp instanceof android.view.ViewGroup)) {
@@ -2763,7 +2798,8 @@ public class MainHook implements IXposedHookLoadPackage {
             int cols = (g instanceof android.widget.GridLayout)
                     ? detectColumns((android.widget.GridLayout) g) : 0;
             synchronized (SIDEBAR_REMOVED) {
-                SIDEBAR_REMOVED.put(target, new Object[]{g, idx, cols});
+                // rec: {parent, index, cols, name, kind} —— name/kind 供名单变更时差异恢复
+                SIDEBAR_REMOVED.put(target, new Object[]{g, idx, cols, name, 1});
             }
             g.removeView(target);
             String r = "removed idx=" + idx + " from " + g.getClass().getSimpleName();
@@ -6837,12 +6873,14 @@ public class MainHook implements IXposedHookLoadPackage {
         // 关闭时立即恢复「我」页菜单里被 GONE 的行
         if (!hide) {
             synchronized (SIDEBAR_HIDDEN) {
-                for (java.util.Map.Entry<android.view.View, int[]> e
+                for (java.util.Map.Entry<android.view.View, Object[]> e
                         : new java.util.ArrayList<>(SIDEBAR_HIDDEN.entrySet())) {
                     try {
                         android.view.View v = e.getKey();
-                        int[] orig = e.getValue();
-                        if (v != null && orig != null) v.setVisibility(orig[0]);
+                        Object[] orig = e.getValue();
+                        if (v != null && orig != null && orig[0] instanceof Integer) {
+                            v.setVisibility((Integer) orig[0]);
+                        }
                     } catch (Throwable ignored) {
                     }
                 }
@@ -6858,7 +6896,41 @@ public class MainHook implements IXposedHookLoadPackage {
     static void setSidebarHideEnabled(boolean on) {
         sidebarHideEnabled = on;
         persistCurrent();
-        if (!on) restoreSidebarEntries();
+        if (!on) restoreAllSidebar();
+    }
+
+    /** 开关关闭时把所有隐藏项（网格+GONE）全部恢复 */
+    private static void restoreAllSidebar() {
+        restoreSidebarEntries();
+        synchronized (SIDEBAR_HIDDEN) {
+            for (java.util.Map.Entry<android.view.View, Object[]> e
+                    : new java.util.ArrayList<>(SIDEBAR_HIDDEN.entrySet())) {
+                try {
+                    android.view.View v = e.getKey();
+                    Object[] rec = e.getValue();
+                    if (v != null && rec != null && rec[0] instanceof Integer) {
+                        v.setVisibility((Integer) rec[0]);
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            SIDEBAR_HIDDEN.clear();
+        }
+    }
+
+    /** v11.6：自动识别到的侧滑栏入口名（按发现顺序）。 */
+    static java.util.List<String> getDiscoveredSidebarEntries() {
+        synchronized (discoveredSidebarEntries) {
+            return new java.util.ArrayList<>(discoveredSidebarEntries.keySet());
+        }
+    }
+
+    /** v11.6：某入口首次发现的面板类型（1=左滑 2=右滑），供面板标注。 */
+    static int getDiscoveredSidebarEntryKind(String name) {
+        synchronized (discoveredSidebarEntries) {
+            Integer k = discoveredSidebarEntries.get(name);
+            return k == null ? 0 : k;
+        }
     }
 
     /** 当前删除名单（按字母序，便于面板展示） */
@@ -6868,7 +6940,7 @@ public class MainHook implements IXposedHookLoadPackage {
         return list;
     }
 
-    /** 整体替换删除名单（面板编辑后调用） */
+    /** 整体替换删除名单（面板编辑后调用）——差异更新，不影响仍在新名单里的项 */
     static void setSidebarHideNames(java.util.List<String> list) {
         Set<String> ns = new HashSet<>();
         if (list != null) {
@@ -6880,7 +6952,7 @@ public class MainHook implements IXposedHookLoadPackage {
         }
         sidebarHideNames = ns;
         persistCurrent();
-        restoreSidebarEntries();
+        reconcileSidebarHides();
     }
 
     // ===== 右滑侧边栏自定义删除 =====
@@ -6890,7 +6962,7 @@ public class MainHook implements IXposedHookLoadPackage {
     static void setSidebarHideRightEnabled(boolean on) {
         sidebarHideRightEnabled = on;
         persistCurrent();
-        if (!on) restoreSidebarEntries();
+        if (!on) restoreAllSidebar();
     }
 
     static java.util.List<String> getSidebarHideRightNameList() {
@@ -6910,7 +6982,66 @@ public class MainHook implements IXposedHookLoadPackage {
         }
         sidebarHideRightNames = ns;
         persistCurrent();
-        restoreSidebarEntries();
+        reconcileSidebarHides();
+    }
+
+    /**
+     * 名单变更后的差异更新：只恢复「不再属于对应名单」的项，
+     * 仍在新名单里的隐藏项保持隐藏——避免新增/删除一个入口时旧的隐藏项重现。
+     * 新加入名单但当前屏幕上还没隐藏的项，交给下次 setText/onLayout 自然处理。
+     */
+    private static void reconcileSidebarHides() {
+        // 1) 网格项（SIDEBAR_REMOVED）：name 不在其 kind 对应名单里 → 插回
+        synchronized (SIDEBAR_REMOVED) {
+            for (java.util.Map.Entry<android.view.View, Object[]> e
+                    : new java.util.ArrayList<>(SIDEBAR_REMOVED.entrySet())) {
+                try {
+                    android.view.View v = e.getKey();
+                    Object[] rec = e.getValue();
+                    String nm = rec.length > 3 && rec[3] instanceof String ? (String) rec[3] : null;
+                    int kind = rec.length > 4 && rec[4] instanceof Integer ? (Integer) rec[4] : 1;
+                    Set<String> active = kind == 2 ? sidebarHideRightNames : sidebarHideNames;
+                    boolean enabledForKind = kind == 2 ? sidebarHideRightEnabled : sidebarHideEnabled;
+                    // 仍在该名单且开关开 → 保持隐藏；否则恢复
+                    if (enabledForKind && nm != null && active.contains(nm)) continue;
+                    android.view.ViewGroup g = (android.view.ViewGroup) rec[0];
+                    int idx = (Integer) rec[1];
+                    int cols = rec.length > 2 && rec[2] instanceof Integer ? (Integer) rec[2] : 0;
+                    if (v == null || g == null || v.getParent() != null) {
+                        SIDEBAR_REMOVED.remove(e.getKey());
+                        continue;
+                    }
+                    int n = Math.max(0, Math.min(idx, g.getChildCount()));
+                    g.addView(v, n);
+                    v.setVisibility(android.view.View.VISIBLE);
+                    if (g instanceof android.widget.GridLayout) {
+                        relayoutGrid((android.widget.GridLayout) g, cols);
+                    }
+                    SIDEBAR_REMOVED.remove(e.getKey());
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        // 2) GONE 项（SIDEBAR_HIDDEN）：同理，仍在新名单 → 保持 GONE，否则恢复
+        synchronized (SIDEBAR_HIDDEN) {
+            for (java.util.Map.Entry<android.view.View, Object[]> e
+                    : new java.util.ArrayList<>(SIDEBAR_HIDDEN.entrySet())) {
+                try {
+                    android.view.View v = e.getKey();
+                    Object[] rec = e.getValue();
+                    String nm = rec.length > 1 && rec[1] instanceof String ? (String) rec[1] : null;
+                    int kind = rec.length > 2 && rec[2] instanceof Integer ? (Integer) rec[2] : 1;
+                    Set<String> active = kind == 2 ? sidebarHideRightNames : sidebarHideNames;
+                    boolean enabledForKind = kind == 2 ? sidebarHideRightEnabled : sidebarHideEnabled;
+                    boolean keepHidden = enabledForKind && nm != null && active.contains(nm);
+                    if (!keepHidden && v != null && rec[0] instanceof Integer) {
+                        v.setVisibility((Integer) rec[0]);
+                        SIDEBAR_HIDDEN.remove(e.getKey());
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        }
     }
 
     /** 把已移除的网格项按原位置插回，并重新排列 */

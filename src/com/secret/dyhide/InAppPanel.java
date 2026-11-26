@@ -1071,6 +1071,7 @@ public class InAppPanel {
         private final EditText input;
         private final TextView summary;
         private final int kind;
+        private LinearLayout discoveredBox;
         private AlertDialog dlg;
 
         NameEditor(Context ctx, TextView summary, int kind) {
@@ -1110,11 +1111,23 @@ public class InAppPanel {
             box.addView(head);
 
             TextView hint = new TextView(ctx);
-            hint.setText("输入入口名称后点「添加」，与侧边栏显示的文字一致即可");
+            hint.setText("点击下方已识别入口快速勾选，或手动输入名称；改动保存后即时生效，无需重启");
             hint.setTextSize(11);
             hint.setTextColor(C_SUB);
-            hint.setPadding(0, dp(d, 6), 0, dp(d, 12));
+            hint.setPadding(0, dp(d, 6), 0, dp(d, 8));
             box.addView(hint);
+
+            // v11.6 自动识别清单：打开过侧滑栏后这里会列出发现的全部入口，点击即勾选/取消
+            TextView discTitle = new TextView(ctx);
+            discTitle.setText("已识别的入口（点选即可加入/移出名单）");
+            discTitle.setTextSize(12);
+            discTitle.setTypeface(Typeface.DEFAULT_BOLD);
+            discTitle.setTextColor(C_ACCENT);
+            discTitle.setPadding(0, dp(d, 2), 0, dp(d, 6));
+            box.addView(discTitle);
+            discoveredBox = new LinearLayout(ctx);
+            discoveredBox.setOrientation(LinearLayout.VERTICAL);
+            box.addView(discoveredBox);
 
             // 输入行
             LinearLayout inputRow = new LinearLayout(ctx);
@@ -1207,6 +1220,58 @@ public class InAppPanel {
 
             dlg = new AlertDialog.Builder(ctx).setView(box).create();
             refreshList();
+            refreshDiscovered();
+        }
+
+        /** 渲染自动识别到的侧滑栏入口清单，点击切换勾选状态 */
+        void refreshDiscovered() {
+            try {
+                discoveredBox.removeAllViews();
+                java.util.List<String> found = MainHook.getDiscoveredSidebarEntries();
+                if (found.isEmpty()) {
+                    TextView t = new TextView(ctx);
+                    t.setText("（还没有识别到入口，请先打开一次左滑/右滑侧边栏）");
+                    t.setTextSize(11);
+                    t.setTextColor(0xFFB49CAC);
+                    discoveredBox.addView(t);
+                    return;
+                }
+                java.util.List<String> sorted = new java.util.ArrayList<>(found);
+                java.util.Collections.sort(sorted);
+                for (final String nm : sorted) {
+                    TextView chip = new TextView(ctx);
+                    boolean on = names.contains(nm);
+                    int dk = MainHook.getDiscoveredSidebarEntryKind(nm);
+                    String tag = dk == 1 ? "左" : (dk == 2 ? "右" : "");
+                    chip.setText((on ? "✓ " : "+ ") + nm + (tag.isEmpty() ? "" : " [" + tag + "]"));
+                    chip.setTextSize(12);
+                    chip.setTextColor(on ? 0xFFFFFFFF : C_ACCENT);
+                    GradientDrawable bg = new GradientDrawable();
+                    bg.setColor(on ? C_ACCENT : 0xFFF8EFF4);
+                    bg.setCornerRadius(9 * d);
+                    chip.setBackgroundDrawable(bg);
+                    chip.setPadding(dp(d, 10), dp(d, 5), dp(d, 10), dp(d, 5));
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT);
+                    lp.bottomMargin = dp(d, 5);
+                    lp.rightMargin = dp(d, 5);
+                    discoveredBox.addView(chip, lp);
+                    chip.setOnClickListener(new SidebarChipListener(this, nm));
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        /** 勾选/取消一个自动识别到的入口 */
+        void toggleDiscoveredName(String nm) {
+            try {
+                if (names.contains(nm)) names.remove(nm);
+                else names.add(nm);
+                refreshList();
+                refreshDiscovered();
+            } catch (Throwable ignored) {
+            }
         }
 
         void show() {
@@ -1248,6 +1313,7 @@ public class InAppPanel {
                 names.add(t);
                 input.setText("");
                 refreshList();
+                refreshDiscovered();
             } catch (Throwable ignored) {
             }
         }
@@ -1256,6 +1322,7 @@ public class InAppPanel {
             try {
                 names.remove(name);
                 refreshList();
+                refreshDiscovered();
             } catch (Throwable ignored) {
             }
         }
@@ -1270,7 +1337,7 @@ public class InAppPanel {
                     MainHook.setSidebarHideNames(names);
                 }
                 if (summary != null) summary.setText(namesSummary(names));
-                Toast.makeText(ctx, "已保存 " + names.size() + " 个名称，重启抖音后生效",
+                Toast.makeText(ctx, "已保存 " + names.size() + " 个名称，下次打开侧边栏生效",
                         Toast.LENGTH_SHORT).show();
                 dismiss();
             } catch (Throwable ignored) {
@@ -1354,6 +1421,20 @@ public class InAppPanel {
         @Override
         public void onClick(View v) {
             ed.removeName(name);
+        }
+    }
+
+    /** 自动识别入口 chip 的点击（具名类规避 D8 匿名类 NPE） */
+    private static class SidebarChipListener implements View.OnClickListener {
+        private final NameEditor ed;
+        private final String name;
+        SidebarChipListener(NameEditor ed, String name) {
+            this.ed = ed;
+            this.name = name;
+        }
+        @Override
+        public void onClick(View v) {
+            ed.toggleDiscoveredName(name);
         }
     }
 
