@@ -2036,13 +2036,27 @@ public class MainHook implements IXposedHookLoadPackage {
             Class<?> c = cl.loadClass(
                     "com.ss.android.ugc.aweme.im.business.cleanstoragepage.view.CleanStorageAdapter");
             XposedBridge.hookAllMethods(c, "onBindBasicViewHolder", new CleanRowFilter());
+            // 41.3.0：聊天记录管理页改为 v2 ConversationCleanAdapter（onBindViewHolder），
+            // args 同样是 (holder,position)，直接复用 CleanRowFilter 的按昵称压行逻辑。
+            int v2 = 0;
+            try {
+                Class<?> c2 = cl.loadClass(
+                        "com.ss.android.ugc.aweme.im.business.cleanstoragepage.v2.conversation.ConversationCleanAdapter");
+                v2 = hookByArity(c2, new String[]{"onBindViewHolder"}, 2,
+                        new CleanRowFilter(), "clean-v2-bind");
+                Class<?> vh2 = cl.loadClass(
+                        "com.ss.android.ugc.aweme.im.business.cleanstoragepage.v2.conversation.ConversationCleanAdapter$ConversationViewHolder");
+                v2 += hookByArity(vh2, new String[]{"B3"}, 1,
+                        new CleanV2HolderHook(), "clean-v2-holder");
+            } catch (Throwable t2) {
+                XposedBridge.log(TAG + ": clean-v2 hook skip " + t2);
+            }
             // RecyclerView 布局后会重置行尺寸，需在布局完成后再纠正一次
             Class<?> rvCls = XposedHelpers.findClass(
                     "androidx.recyclerview.widget.RecyclerView", cl);
             XposedBridge.hookAllMethods(rvCls, "onLayout", new CleanRvLayoutHook());
             XposedBridge.hookAllMethods(rvCls, "onMeasure", new CleanRvMeasureHook());
-            XposedBridge.hookAllMethods(rvCls, "onMeasure", new CleanRvMeasureHook());
-            XposedBridge.log(TAG + ": clean-storage filter hook ok");
+            XposedBridge.log(TAG + ": clean-storage filter hook ok v2=" + v2);
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": clean-storage skip " + t.getClass().getSimpleName());
         }
@@ -2107,6 +2121,50 @@ public class MainHook implements IXposedHookLoadPackage {
                     }
                     row.requestLayout();
                     row.requestLayout();
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /** v2 聊天记录管理页：ConversationViewHolder.B3(item) 的 thisObject 就是 holder。 */
+    private static class CleanV2HolderHook extends XC_MethodHook {
+        private long lastLog = 0L;
+        @Override
+        protected void afterHookedMethod(MethodHookParam param) {
+            try {
+                Object itemView = XposedHelpers.getObjectField(param.thisObject, "itemView");
+                if (!(itemView instanceof android.view.View)) return;
+                android.view.View row = (android.view.View) itemView;
+                boolean hide = false;
+                String title = null;
+                if (enabled && cleanStorageHidden) {
+                    title = rowTitle(row);
+                    if (title != null && isHiddenName(title)) hide = true;
+                }
+                android.view.ViewGroup.LayoutParams lp = row.getLayoutParams();
+                if (hide) {
+                    if (lp != null && lp.height != 0) {
+                        row.setTag(0x7E11, lp.height);
+                        lp.height = 0;
+                        row.setLayoutParams(lp);
+                    }
+                    row.setVisibility(android.view.View.GONE);
+                    long now = System.currentTimeMillis();
+                    if (now - lastLog > 800) {
+                        lastLog = now;
+                        XposedBridge.log(TAG + ": clean-v2 row hidden " + title);
+                    }
+                } else {
+                    if (lp != null && lp.height == 0) {
+                        Object o = row.getTag(0x7E11);
+                        lp.height = o instanceof Integer ? (Integer) o
+                                : android.view.ViewGroup.LayoutParams.WRAP_CONTENT;
+                        row.setLayoutParams(lp);
+                    }
+                    if (row.getVisibility() != android.view.View.VISIBLE) {
+                        row.setVisibility(android.view.View.VISIBLE);
+                    }
                 }
             } catch (Throwable ignored) {
             }
@@ -3721,15 +3779,21 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> mgr = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.im.sdk.notification.immessage.ImInnerPushManagerNew", cl);
-            // 精确按方法名 LJ + 2 个参数 hook，不硬依赖 BannerInfo/Function1 类名
+            // 41.3.0：横幅入口 LJ(BannerInfo,Function1) → LJII(BannerInfo,Function1)；
+            // 旧的 LJ 现在是 LJ(List,ALambda)，误挂会拦不到横幅。按候选名 + 首参含
+            // BannerInfo 特征精确匹配，兼顾 40.8(LJ) 与 41.3(LJII)。
             for (Method m : mgr.getDeclaredMethods()) {
-                if ("LJ".equals(m.getName()) && m.getParameterTypes().length == 2) {
-                    try {
-                        XposedBridge.hookMethod(m, mask);
-                        ok++;
-                    } catch (Throwable t) {
-                        XposedBridge.log(TAG + ": banner LJ hook one failed: " + t);
-                    }
+                boolean nameOk = "LJII".equals(m.getName()) || "LJ".equals(m.getName());
+                if (!nameOk || m.getParameterTypes().length != 2) continue;
+                try {
+                    String p0 = m.getParameterTypes()[0].getName();
+                    // BannerInfo 类特征：类名含 BannerInfo 或通知包，排除 List/ALambda 重载
+                    if (p0.equals("java.util.List") || p0.contains("ALambda")) continue;
+                    XposedBridge.hookMethod(m, mask);
+                    ok++;
+                    XposedBridge.log(TAG + ": banner mask hook -> " + m.getName() + "(" + p0 + ")");
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + ": banner hook one failed: " + t);
                 }
             }
             XposedBridge.log(TAG + ": banner mask hooks installed " + ok);
@@ -7227,6 +7291,12 @@ public class MainHook implements IXposedHookLoadPackage {
         // 注意：不能硬编码 equals jadx 重命名名，须按运行时混淆名特征匹配。
         if (cn.startsWith("X.10o") || cn.contains("C241410oC")) {
             String s = tryStr(item, new String[]{"LJIJ", "LJIILJJIL", "LJIIJ", "getUid", "getSecUid", "getUidS"});
+            if (isHiddenUid(s)) return s;
+        }
+        // 41.3.0 本地搜索结果元素改为 X.14NE：LJIJ()=uniqueId（真 uid），
+        // LJIIIZ()=remarkName（昵称，不能用）。老硬编码 X.10o 漏掉此类 → 粉丝搜索失效。
+        if (cn.startsWith("X.14N") || cn.contains("14NE")) {
+            String s = tryStr(item, new String[]{"LJIJ", "getUid", "getUidS", "getSecUid", "getUniqueId"});
             if (isHiddenUid(s)) return s;
         }
         Object o = matchAllowed(item, item.getClass(), 0);

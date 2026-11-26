@@ -1403,12 +1403,17 @@ public class InAppPanel {
 
     /** 读取隐藏面某一项的当前开关状态 */
     private static boolean itemOn(String key) {
+        // 临时显示（长按恢复）期间，session/share/blockEnter 三项实际已暂停隐藏：
+        // 面板开关应显示为「关」，恢复隐藏后再显示「开」，与运行时行为一致。
+        boolean tempOn = MainHook.isTempPaused();
+        boolean tempPausable = "session".equals(key) || "share".equals(key)
+                || "blockEnter".equals(key);
+        if (tempOn && tempPausable) return false;
         if ("topbar".equals(key)) return MainHook.isTopbarHidden();
         if ("visitor".equals(key)) return MainHook.isVisitorHidden();
         if ("interact".equals(key)) return MainHook.isInteractHidden();
         if ("blockEnter".equals(key)) return MainHook.isBlockEnterHidden();
         if ("cleanStorage".equals(key)) return MainHook.isCleanStorageHidden();
-        if ("profileEntry".equals(key)) return MainHook.isProfileEntryEnabled();
         if ("profileEntry".equals(key)) return MainHook.isProfileEntryEnabled();
         return MainHook.isFeatureOn(key);
     }
