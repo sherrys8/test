@@ -1909,17 +1909,9 @@ public class MainHook implements IXposedHookLoadPackage {
             java.util.List<android.view.View> all = new java.util.ArrayList<>();
             collectAll(root, all, 0);
 
-            boolean perEntry = profileEntryNames != null && !profileEntryNames.isEmpty();
-            if (!perEntry) {
-                // 旧行为：名单为空 → 整排 GONE
-                for (android.view.View v : all) {
-                    String cn = v.getClass().getSimpleName();
-                    if (!cn.contains("CardEntriesScrollView")
-                            && !cn.contains("ProfileCardEntries")) continue;
-                    hideEntryView(v, cn, round);
-                }
-                return;
-            }
+            // 只开开关、没有选择任何入口 → 不隐藏任何东西。
+            // 旧行为（名单空=整排 GONE）会让用户一开开关就整行消失。
+            if (profileEntryNames == null || profileEntryNames.isEmpty()) return;
 
             // v12 逐个隐藏：算出命中名单的入口显示名
             java.util.Set<String> hideTitles = new java.util.HashSet<String>();
@@ -1947,6 +1939,25 @@ public class MainHook implements IXposedHookLoadPackage {
             // 找不到个人主页入口条时，绝不能退化为整页按文字隐藏：
             // 侧滑栏里也有「观看历史」等同名入口，会被一起 GONE。
             if (bar == null) return;
+
+            // 只有“已发现的入口全部被选中”时才整排隐藏；
+            // 部分选中只隐藏选中的卡片，不能把整条入口条 GONE。
+            boolean allSelected = true;
+            int known = 0;
+            synchronized (discoveredProfileEntries) {
+                for (String key : discoveredProfileEntries.keySet()) {
+                    known++;
+                    if (!profileEntryNames.contains(key)) {
+                        allSelected = false;
+                        break;
+                    }
+                }
+            }
+            if (known > 0 && allSelected) {
+                hideEntryView(bar, "all-entries", round);
+                return;
+            }
+
             java.util.List<android.view.View> scope = new java.util.ArrayList<>();
             collectAll(bar, scope, 0);
 
