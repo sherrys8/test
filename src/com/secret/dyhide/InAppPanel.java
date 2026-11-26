@@ -1269,6 +1269,14 @@ public class InAppPanel {
                 } else {
                     MainHook.setSidebarHideNames(names);
                 }
+                // 名单非空时自动开启对应开关，避免「只填名单但开关没开」看起来不生效
+                if (!names.isEmpty()) {
+                    if (kind == 1 && !MainHook.isSidebarHideRightEnabled()) {
+                        MainHook.setSidebarHideRightEnabled(true);
+                    } else if (kind == 0 && !MainHook.isSidebarHideEnabled()) {
+                        MainHook.setSidebarHideEnabled(true);
+                    }
+                }
                 if (summary != null) summary.setText(namesSummary(names));
                 Toast.makeText(ctx, "已保存 " + names.size() + " 个名称，下次打开侧边栏生效",
                         Toast.LENGTH_SHORT).show();

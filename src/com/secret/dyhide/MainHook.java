@@ -2431,20 +2431,29 @@ public class MainHook implements IXposedHookLoadPackage {
      * 判定 View 位于哪一种侧边栏：1=左侧「我」页 ProfileSideBar，2=右侧首页 HomeSideBar，0=都不是。
      *
      * v11.10：dexsql 查 41.3.0 APK 确认两套面板有独立容器类：
-     *   - 左侧「我」页：com.ss.android.ugc.aweme.sidebar.profilesidebar.panel.ui.ProfileSideBarFrameLayout
-     *                   / ProfileSideBarNestedScrollView
-     *   - 右侧首页：  com.ss.android.ugc.aweme.sidebar.panel.ui.SideBarNestedScrollView
-     * 因此优先按祖先类名区分，不再依赖 ScrollView 层数或屏幕几何（两者都会被布局结构影响）。
-     * 类名信息缺失时再用面板水平中心兜底：偏左=左侧(1)，偏右=右侧(2)。
+     * dexsql 里虽然有 profilesidebar 专属类，但 41.3.0 真机 dump 证明：
+     * 「我」页左侧面板与首页右侧面板**都使用 HomeSideBar 模板**
+     * （SideBarNestedScrollView / GridListItemView），类名无法区分左右。
+     * 因此类名只用于识别 ProfileSideBar 这种明确变体，正常情况按面板屏幕位置判定：
+     * 贴左=左侧(1)，贴右=右侧(2)。
      */
     private static int sidebarKind(android.view.View v) {
         boolean isProfile = false;
         boolean isSidebar = false;
         android.view.View outer = null;
         android.view.View cur = v;
-        for (int i = 0; i < 30 && cur != null; i++) {
+        // 层级放宽到 80：Profile 面板根容器可能被 ViewPager/RecyclerView 包很多层，
+        // 但条目自己的 CellView 通常就在 3~8 层内，类名即可判定。
+        for (int i = 0; i < 80 && cur != null; i++) {
             String cn = cur.getClass().getName();
-            if (cn.contains("ProfileSideBar") || cn.contains("profilesidebar")) isProfile = true;
+            // 左侧「我」页专属：面板根 / 条目 Cell / 基础 ItemView
+            if (cn.contains("ProfileSideBar")
+                    || cn.contains("ProfileBaseSideBarItemView")
+                    || cn.contains("ProfileGridListCellView")
+                    || cn.contains("ProfileVerticalListCellView")) {
+                isProfile = true;
+            }
+            // 右侧首页专属：模板 Cell / 基础 ItemView / 面板 ScrollView
             if (cn.contains("SideBar") || cn.contains("sidebar")) isSidebar = true;
             // 持续覆盖：循环结束时保留的是最外层（最靠近根）的那个
             if (cn.contains("SideBarNestedScrollView")) outer = cur;
@@ -2456,9 +2465,10 @@ public class MainHook implements IXposedHookLoadPackage {
                 break;
             }
         }
-        if (isProfile) return 1;   // 左侧「我」页 ProfileSideBar
-        if (isSidebar) return 2;   // 右侧首页 HomeSideBar
-        // 兜底：类名被混淆/改名时用面板几何位置
+        if (isProfile) return 1;   // 明确的 ProfileSideBar 专属类，直接判左
+        // 41.3.0 实测：「我」页左侧面板与首页右侧面板都用 HomeSideBar 模板类
+        // （SideBarNestedScrollView / GridListItemView），类名无法区分，必须看面板位置：
+        // 贴屏幕左侧=左侧(1)，贴屏幕右侧=右侧(2)。
         if (outer != null) {
             try {
                 int sw = v.getResources().getDisplayMetrics().widthPixels;
@@ -2474,6 +2484,7 @@ public class MainHook implements IXposedHookLoadPackage {
             } catch (Throwable ignored) {
             }
         }
+        if (isSidebar) return 2;   // 几何拿不到时的兜底
         return 0;
     }
 
