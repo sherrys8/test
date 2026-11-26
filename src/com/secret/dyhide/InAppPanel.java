@@ -1111,22 +1111,28 @@ public class InAppPanel {
             box.addView(head);
 
             TextView hint = new TextView(ctx);
-            hint.setText("点击下方已识别入口快速勾选，或手动输入名称；改动保存后即时生效，无需重启");
+            hint.setText(kind == 2
+                    ? "手动输入「我」页入口名称；改动保存后即时生效，无需重启"
+                    : "点击下方已识别入口快速勾选，或手动输入名称；改动保存后即时生效，无需重启");
             hint.setTextSize(11);
             hint.setTextColor(C_SUB);
             hint.setPadding(0, dp(d, 6), 0, dp(d, 8));
             box.addView(hint);
 
-            // v11.6 自动识别清单：打开过侧滑栏后这里会列出发现的全部入口，点击即勾选/取消
+            // v11.7 自动识别清单：只显示当前这一侧发现过的入口；主页入口条(2)不显示
             TextView discTitle = new TextView(ctx);
-            discTitle.setText("已识别的入口（点选即可加入/移出名单）");
+            discTitle.setText(kind == 1
+                    ? "已识别的右滑入口（点选即可加入/移出名单）"
+                    : "已识别的左滑入口（点选即可加入/移出名单）");
             discTitle.setTextSize(12);
             discTitle.setTypeface(Typeface.DEFAULT_BOLD);
             discTitle.setTextColor(C_ACCENT);
             discTitle.setPadding(0, dp(d, 2), 0, dp(d, 6));
+            if (kind == 2) discTitle.setVisibility(View.GONE);
             box.addView(discTitle);
             discoveredBox = new LinearLayout(ctx);
             discoveredBox.setOrientation(LinearLayout.VERTICAL);
+            if (kind == 2) discoveredBox.setVisibility(View.GONE);
             box.addView(discoveredBox);
 
             // 输入行
@@ -1166,23 +1172,16 @@ public class InAppPanel {
             add.setOnClickListener(new NameAddListener(this));
             box.addView(inputRow);
 
-            // 条目列表
-            ScrollView sc = new ScrollView(ctx);
-            sc.setVerticalScrollBarEnabled(false);
+            // 条目列表：整块内容由外层 ScrollView 统一滚动，入口较多时也能上下滑动
             listBox = new LinearLayout(ctx);
             listBox.setOrientation(LinearLayout.VERTICAL);
             listBox.setPadding(0, dp(d, 10), 0, 0);
-            sc.addView(listBox);
-            LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, 0);
-            slp.weight = 1f;
-            slp.topMargin = dp(d, 4);
-            box.addView(sc, slp);
+            box.addView(listBox);
 
-            // 底部按钮
+            // 底部按钮（固定在滚动区外，始终可点）
             LinearLayout btns = new LinearLayout(ctx);
             btns.setOrientation(LinearLayout.HORIZONTAL);
-            btns.setPadding(0, dp(d, 12), 0, 0);
+            btns.setPadding(dp(d, 20), dp(d, 10), dp(d, 20), dp(d, 2));
 
             TextView cancel = new TextView(ctx);
             cancel.setText("取消");
@@ -1216,34 +1215,50 @@ public class InAppPanel {
             svlp.leftMargin = dp(d, 6);
             btns.addView(save, svlp);
             save.setOnClickListener(new NameSaveListener(this));
-            box.addView(btns);
 
-            dlg = new AlertDialog.Builder(ctx).setView(box).create();
+            // v11.7：标题/提示/识别区/输入行/名单全部放进同一个 ScrollView，
+            // 只有底部按钮固定，入口多时可完整上下滑动。
+            ScrollView outer = new ScrollView(ctx);
+            outer.setVerticalScrollBarEnabled(false);
+            outer.setFillViewport(true);
+            outer.addView(box, new ScrollView.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT));
+            LinearLayout root = new LinearLayout(ctx);
+            root.setOrientation(LinearLayout.VERTICAL);
+            root.addView(outer, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+            root.addView(btns, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            dlg = new AlertDialog.Builder(ctx).setView(root).create();
             refreshList();
             refreshDiscovered();
         }
 
-        /** 渲染自动识别到的侧滑栏入口清单，点击切换勾选状态 */
+        /** 渲染当前这一侧识别到的入口清单，点击切换勾选状态 */
         void refreshDiscovered() {
             try {
+                if (kind == 2) return; // 「我」页入口条不走侧滑栏识别
                 discoveredBox.removeAllViews();
-                java.util.List<String> found = MainHook.getDiscoveredSidebarEntries();
+                java.util.List<String> found = MainHook.getDiscoveredSidebarEntries(kind);
                 if (found.isEmpty()) {
                     TextView t = new TextView(ctx);
-                    t.setText("（还没有识别到入口，请先打开一次左滑/右滑侧边栏）");
+                    t.setText(kind == 1
+                            ? "（还没有识别到右滑入口，请先打开一次「我」页右侧边栏）"
+                            : "（还没有识别到左滑入口，请先打开一次左滑侧边栏）");
                     t.setTextSize(11);
                     t.setTextColor(0xFFB49CAC);
                     discoveredBox.addView(t);
                     return;
                 }
-                java.util.List<String> sorted = new java.util.ArrayList<>(found);
-                java.util.Collections.sort(sorted);
-                for (final String nm : sorted) {
+                for (final String nm : found) {
                     TextView chip = new TextView(ctx);
                     boolean on = names.contains(nm);
                     int dk = MainHook.getDiscoveredSidebarEntryKind(nm);
-                    String tag = dk == 1 ? "左" : (dk == 2 ? "右" : "");
-                    chip.setText((on ? "✓ " : "+ ") + nm + (tag.isEmpty() ? "" : " [" + tag + "]"));
+                    String tag = dk == 3 ? " [两侧]" : "";
+                    chip.setText((on ? "✓ " : "+ ") + nm + tag);
                     chip.setTextSize(12);
                     chip.setTextColor(on ? 0xFFFFFFFF : C_ACCENT);
                     GradientDrawable bg = new GradientDrawable();
@@ -1279,7 +1294,7 @@ public class InAppPanel {
             try {
                 android.util.DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
                 dlg.getWindow().setLayout((int) (dm.widthPixels * 0.86f),
-                        (int) (dm.heightPixels * 0.55f));
+                        (int) (dm.heightPixels * 0.78f));
                 GradientDrawable wbg = new GradientDrawable();
                 wbg.setColor(0xFFFFFFFF);
                 wbg.setCornerRadius(dp(d, 20));
