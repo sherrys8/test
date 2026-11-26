@@ -1071,7 +1071,6 @@ public class InAppPanel {
         private final EditText input;
         private final TextView summary;
         private final int kind;
-        private LinearLayout discoveredBox;
         private AlertDialog dlg;
 
         NameEditor(Context ctx, TextView summary, int kind) {
@@ -1111,29 +1110,11 @@ public class InAppPanel {
             box.addView(head);
 
             TextView hint = new TextView(ctx);
-            hint.setText(kind == 2
-                    ? "手动输入「我」页入口名称；改动保存后即时生效，无需重启"
-                    : "点击下方已识别入口快速勾选，或手动输入名称；改动保存后即时生效，无需重启");
+            hint.setText("输入入口名称后点「添加」；改动保存后即时生效，无需重启");
             hint.setTextSize(11);
             hint.setTextColor(C_SUB);
             hint.setPadding(0, dp(d, 6), 0, dp(d, 8));
             box.addView(hint);
-
-            // v11.7 自动识别清单：只显示当前这一侧发现过的入口；主页入口条(2)不显示
-            TextView discTitle = new TextView(ctx);
-            discTitle.setText(kind == 1
-                    ? "已识别的右滑入口（点选即可加入/移出名单）"
-                    : "已识别的左滑入口（点选即可加入/移出名单）");
-            discTitle.setTextSize(12);
-            discTitle.setTypeface(Typeface.DEFAULT_BOLD);
-            discTitle.setTextColor(C_ACCENT);
-            discTitle.setPadding(0, dp(d, 2), 0, dp(d, 6));
-            if (kind == 2) discTitle.setVisibility(View.GONE);
-            box.addView(discTitle);
-            discoveredBox = new LinearLayout(ctx);
-            discoveredBox.setOrientation(LinearLayout.VERTICAL);
-            if (kind == 2) discoveredBox.setVisibility(View.GONE);
-            box.addView(discoveredBox);
 
             // 输入行
             LinearLayout inputRow = new LinearLayout(ctx);
@@ -1216,8 +1197,8 @@ public class InAppPanel {
             btns.addView(save, svlp);
             save.setOnClickListener(new NameSaveListener(this));
 
-            // v11.7：标题/提示/识别区/输入行/名单全部放进同一个 ScrollView，
-            // 只有底部按钮固定，入口多时可完整上下滑动。
+            // 标题/提示/输入行/名单全部放进同一个 ScrollView，
+            // 只有底部按钮固定，条目多时可完整上下滑动。
             ScrollView outer = new ScrollView(ctx);
             outer.setVerticalScrollBarEnabled(false);
             outer.setFillViewport(true);
@@ -1234,59 +1215,6 @@ public class InAppPanel {
 
             dlg = new AlertDialog.Builder(ctx).setView(root).create();
             refreshList();
-            refreshDiscovered();
-        }
-
-        /** 渲染当前这一侧识别到的入口清单，点击切换勾选状态 */
-        void refreshDiscovered() {
-            try {
-                if (kind == 2) return; // 「我」页入口条不走侧滑栏识别
-                discoveredBox.removeAllViews();
-                java.util.List<String> found = MainHook.getDiscoveredSidebarEntries(kind);
-                if (found.isEmpty()) {
-                    TextView t = new TextView(ctx);
-                    t.setText(kind == 1
-                            ? "（还没有识别到右滑入口，请先打开一次「我」页右侧边栏）"
-                            : "（还没有识别到左滑入口，请先打开一次左滑侧边栏）");
-                    t.setTextSize(11);
-                    t.setTextColor(0xFFB49CAC);
-                    discoveredBox.addView(t);
-                    return;
-                }
-                for (final String nm : found) {
-                    TextView chip = new TextView(ctx);
-                    boolean on = names.contains(nm);
-                    int dk = MainHook.getDiscoveredSidebarEntryKind(nm);
-                    String tag = dk == 3 ? " [两侧]" : "";
-                    chip.setText((on ? "✓ " : "+ ") + nm + tag);
-                    chip.setTextSize(12);
-                    chip.setTextColor(on ? 0xFFFFFFFF : C_ACCENT);
-                    GradientDrawable bg = new GradientDrawable();
-                    bg.setColor(on ? C_ACCENT : 0xFFF8EFF4);
-                    bg.setCornerRadius(9 * d);
-                    chip.setBackgroundDrawable(bg);
-                    chip.setPadding(dp(d, 10), dp(d, 5), dp(d, 10), dp(d, 5));
-                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.WRAP_CONTENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT);
-                    lp.bottomMargin = dp(d, 5);
-                    lp.rightMargin = dp(d, 5);
-                    discoveredBox.addView(chip, lp);
-                    chip.setOnClickListener(new SidebarChipListener(this, nm));
-                }
-            } catch (Throwable ignored) {
-            }
-        }
-
-        /** 勾选/取消一个自动识别到的入口 */
-        void toggleDiscoveredName(String nm) {
-            try {
-                if (names.contains(nm)) names.remove(nm);
-                else names.add(nm);
-                refreshList();
-                refreshDiscovered();
-            } catch (Throwable ignored) {
-            }
         }
 
         void show() {
@@ -1328,7 +1256,6 @@ public class InAppPanel {
                 names.add(t);
                 input.setText("");
                 refreshList();
-                refreshDiscovered();
             } catch (Throwable ignored) {
             }
         }
@@ -1337,7 +1264,6 @@ public class InAppPanel {
             try {
                 names.remove(name);
                 refreshList();
-                refreshDiscovered();
             } catch (Throwable ignored) {
             }
         }
@@ -1436,20 +1362,6 @@ public class InAppPanel {
         @Override
         public void onClick(View v) {
             ed.removeName(name);
-        }
-    }
-
-    /** 自动识别入口 chip 的点击（具名类规避 D8 匿名类 NPE） */
-    private static class SidebarChipListener implements View.OnClickListener {
-        private final NameEditor ed;
-        private final String name;
-        SidebarChipListener(NameEditor ed, String name) {
-            this.ed = ed;
-            this.name = name;
-        }
-        @Override
-        public void onClick(View v) {
-            ed.toggleDiscoveredName(name);
         }
     }
 

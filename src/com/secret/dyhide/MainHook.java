@@ -122,10 +122,6 @@ public class MainHook implements IXposedHookLoadPackage {
     /** v12：逐个隐藏——hook 扫描到的入口清单（标识 id:xxx / type:x → 显示名），供面板勾选 */
     private static final java.util.LinkedHashMap<String, String> discoveredProfileEntries =
             new java.util.LinkedHashMap<String, String>();
-    /** v11.7：侧滑栏自动识别——打开左滑/右滑面板时登记发现的入口名，供面板勾选。
-     *  value = 位掩码：bit0(1)=左滑、bit1(2)=右滑，3=两侧都有。同名入口两侧都保留。 */
-    private static final java.util.LinkedHashMap<String, Integer> discoveredSidebarEntries =
-            new java.util.LinkedHashMap<String, Integer>();
     /** 隐藏个人主页标签（作品/日常/收藏/喜欢/去过）：开关 + 名单（标识 tab:<type>）。 */
     private static volatile boolean profileTabEnabled = false;
     private static volatile Set<String> profileTabNames = new HashSet<>();
@@ -2421,16 +2417,6 @@ public class MainHook implements IXposedHookLoadPackage {
                 if (!(param.thisObject instanceof android.view.View)) return;
                 android.view.View tv = (android.view.View) param.thisObject;
 
-                // v11.8 自动识别：把侧滑栏里出现的入口名登记到清单（不受名单/开关限制）。
-                // sidebarKind 依赖面板布局后的宽度，setText 时面板可能还没 measure，
-                // 因此先判是否在侧边栏，再 post 到布局完成后按几何位置登记左右侧。
-                if (text.length() <= 10 && !text.contains(" ") && isInSidebar(tv)) {
-                    try {
-                        tv.post(new SidebarDiscoverTask(tv, text));
-                    } catch (Throwable ignored) {
-                    }
-                }
-
                 boolean maybe = "观看历史".equals(text)
                         || (sidebarHideEnabled && sidebarHideNames.contains(text))
                         || (sidebarHideRightEnabled && sidebarHideRightNames.contains(text));
@@ -2439,51 +2425,6 @@ public class MainHook implements IXposedHookLoadPackage {
             } catch (Throwable ignored) {
             }
         }
-    }
-
-    /** v11.8：布局后登记一个侧滑栏入口（具名类规避 D8 匿名类 NPE） */
-    private static class SidebarDiscoverTask implements Runnable {
-        private final android.view.View view;
-        private final String name;
-
-        SidebarDiscoverTask(android.view.View view, String name) {
-            this.view = view;
-            this.name = name;
-        }
-
-        @Override
-        public void run() {
-            try {
-                int sk = sidebarKind(view);
-                if (sk == 0) return;
-                synchronized (discoveredSidebarEntries) {
-                    Integer prev = discoveredSidebarEntries.get(name);
-                    int mask = prev == null ? 0 : prev;
-                    int bit = sk == 1 ? 1 : (sk == 2 ? 2 : 0);
-                    if (bit != 0 && (mask & bit) == 0) {
-                        discoveredSidebarEntries.put(name, mask | bit);
-                    }
-                }
-            } catch (Throwable ignored) {
-            }
-        }
-    }
-
-    /** 祖先链中是否存在 SideBar/sidebar 容器（不依赖布局，可在 setText 时判断） */
-    private static boolean isInSidebar(android.view.View v) {
-        android.view.View cur = v;
-        for (int i = 0; i < 30 && cur != null; i++) {
-            String cn = cur.getClass().getName();
-            if (cn.contains("SideBar") || cn.contains("sidebar")) return true;
-            try {
-                android.view.ViewParent p = cur.getParent();
-                if (!(p instanceof android.view.View)) break;
-                cur = (android.view.View) p;
-            } catch (Throwable t) {
-                break;
-            }
-        }
-        return false;
     }
 
     /**
@@ -6945,36 +6886,6 @@ public class MainHook implements IXposedHookLoadPackage {
             }
             SIDEBAR_HIDDEN.clear();
         }
-    }
-
-    /** v11.6：自动识别到的侧滑栏入口名（按发现顺序）。 */
-    static java.util.List<String> getDiscoveredSidebarEntries() {
-        synchronized (discoveredSidebarEntries) {
-            return new java.util.ArrayList<>(discoveredSidebarEntries.keySet());
-        }
-    }
-
-    /** v11.7：某入口出现的面板位掩码（1=左滑 2=右滑 3=两侧都有）。 */
-    static int getDiscoveredSidebarEntryKind(String name) {
-        synchronized (discoveredSidebarEntries) {
-            Integer k = discoveredSidebarEntries.get(name);
-            return k == null ? 0 : k;
-        }
-    }
-
-    /** v11.7：只取某一侧发现过的入口名，按名称排序。
-     *  side: 0=左滑名单，1=右滑名单（与 InAppPanel 的 NameEditor.kind 一致）。 */
-    static java.util.List<String> getDiscoveredSidebarEntries(int side) {
-        int bit = (side == 1) ? 2 : 1;
-        java.util.List<String> out = new java.util.ArrayList<String>();
-        synchronized (discoveredSidebarEntries) {
-            for (java.util.Map.Entry<String, Integer> e : discoveredSidebarEntries.entrySet()) {
-                Integer m = e.getValue();
-                if (m != null && (m & bit) != 0) out.add(e.getKey());
-            }
-        }
-        java.util.Collections.sort(out);
-        return out;
     }
 
     /** 当前删除名单（按字母序，便于面板展示） */
