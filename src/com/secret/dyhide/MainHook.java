@@ -158,6 +158,16 @@ public class MainHook implements IXposedHookLoadPackage {
             java.util.Collections.synchronizedMap(
                     new java.util.WeakHashMap<android.view.View, Object[]>());
 
+    /** 当前真正可见的面板根；GridLayoutFixHook 只处理它下面的网格。 */
+    private static volatile android.view.View activePanelRoot = null;
+    /** 已按“可见项数量”补过位的网格，避免每次布局重复重排。 */
+    private static final java.util.Map<android.widget.GridLayout, Integer> GRID_NORMALIZED =
+            java.util.Collections.synchronizedMap(
+                    new java.util.WeakHashMap<android.widget.GridLayout, Integer>());
+    private static final java.util.Map<android.widget.GridLayout, Long> GRID_LAST_RELAYOUT =
+            java.util.Collections.synchronizedMap(
+                    new java.util.WeakHashMap<android.widget.GridLayout, Long>());
+
     /** 侧边栏内的网格容器缓存（只对它们做「布局后纠正」，避免全局开销）。 */
     private static final java.util.Set<android.widget.GridLayout> SIDEBAR_GRIDS =
             java.util.Collections.newSetFromMap(
@@ -1759,6 +1769,24 @@ public class MainHook implements IXposedHookLoadPackage {
                 title = readStringField(e, "subtitle", "cardSubtitle");
             }
             if (title == null || title.trim().isEmpty()) {
+                // 字段名被混淆时，扫描所有短字符串，取一个像标题的值（如“观看历史”）。
+                // 这样 type 选择仍可在视图层按文字隐藏，不需要在数据层按 type 删除。
+                try {
+                    for (java.lang.reflect.Field f : e.getClass().getDeclaredFields()) {
+                        f.setAccessible(true);
+                        Object v = f.get(e);
+                        if (!(v instanceof CharSequence)) continue;
+                        String sv = v.toString().trim();
+                        if (sv.length() < 2 || sv.length() > 16) continue;
+                        if (sv.matches("^[0-9]+$") || sv.contains("://")) continue;
+                        if (id != null && sv.equals(id.trim())) continue;
+                        title = sv;
+                        break;
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            if (title == null || title.trim().isEmpty()) {
                 title = "入口 " + type;
             }
             synchronized (discoveredProfileEntries) {
@@ -1916,9 +1944,11 @@ public class MainHook implements IXposedHookLoadPackage {
                     bar = v; break;
                 }
             }
+            // 找不到个人主页入口条时，绝不能退化为整页按文字隐藏：
+            // 侧滑栏里也有「观看历史」等同名入口，会被一起 GONE。
+            if (bar == null) return;
             java.util.List<android.view.View> scope = new java.util.ArrayList<>();
-            if (bar != null) collectAll(bar, scope, 0);
-            else scope = all;
+            collectAll(bar, scope, 0);
 
             for (android.view.View v : scope) {
                 if (!(v instanceof android.widget.TextView)) continue;
@@ -2197,28 +2227,55 @@ public class MainHook implements IXposedHookLoadPackage {
                     PENDING_DEL.clear();
                 }
                 if (del.isEmpty()) return;
-                Object raw = XposedHelpers.getObjectField(adapter, "x");
-                if (!(raw instanceof java.util.List)) return;
-                java.util.List<?> list = (java.util.List<?>) raw;
                 del.add(pos);
                 java.util.Collections.sort(del, java.util.Collections.reverseOrder());
+                // 41.3.0 的 ConversationCleanAdapter 继承 ListAdapter，
+                // 数据不在旧 BaseAdapter.x，而是 AsyncListDiffer 内部；
+                // 必须 getCurrentList() 复制后 submitList()，否则 NoSuchFieldError。
+                Object raw = null;
+                try {
+                    raw = XposedHelpers.getObjectField(adapter, "x");
+                } catch (Throwable ignored) {
+                }
+                if (raw instanceof java.util.List) {
+                    java.util.List<?> list = (java.util.List<?>) raw;
+                    int removed = 0;
+                    int last = -1;
+                    for (int p : del) {
+                        if (p == last) continue;
+                        last = p;
+                        if (p >= 0 && p < list.size()) {
+                            try {
+                                list.remove(p);
+                                removed++;
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                    }
+                    if (removed > 0) {
+                        XposedHelpers.callMethod(adapter, "notifyDataSetChanged");
+                        XposedBridge.log(TAG + ": clean-data removed " + removed
+                                + " left=" + list.size());
+                    }
+                    return;
+                }
+                Object current = XposedHelpers.callMethod(adapter, "getCurrentList");
+                if (!(current instanceof java.util.List)) return;
+                java.util.List<Object> copy = new java.util.ArrayList<>((java.util.List<?>) current);
                 int removed = 0;
                 int last = -1;
                 for (int p : del) {
                     if (p == last) continue;
                     last = p;
-                    if (p >= 0 && p < list.size()) {
-                        try {
-                            list.remove(p);
-                            removed++;
-                        } catch (Throwable ignored) {
-                        }
+                    if (p >= 0 && p < copy.size()) {
+                        copy.remove(p);
+                        removed++;
                     }
                 }
                 if (removed > 0) {
-                    XposedHelpers.callMethod(adapter, "notifyDataSetChanged");
-                    XposedBridge.log(TAG + ": clean-data removed " + removed
-                            + " left=" + list.size());
+                    XposedHelpers.callMethod(adapter, "submitList", copy);
+                    XposedBridge.log(TAG + ": clean-data submitList removed " + removed
+                            + " left=" + copy.size());
                 }
             } catch (Throwable t) {
                 XposedBridge.log(TAG + ": clean-data failed " + t.getClass().getSimpleName());
@@ -2430,6 +2487,8 @@ public class MainHook implements IXposedHookLoadPackage {
                 android.view.View root = (android.view.View) o;
                 root.getViewTreeObserver().addOnGlobalLayoutListener(
                         new SidebarGlobalLayoutListener(root));
+                root.getViewTreeObserver().addOnPreDrawListener(
+                        new SidebarPreDrawListener(root));
                 XposedBridge.log(TAG + ": sidebar global-layout attached");
             } catch (Throwable t) {
                 XposedBridge.log(TAG + ": sidebar global-layout fail " + t);
@@ -2449,9 +2508,44 @@ public class MainHook implements IXposedHookLoadPackage {
         public void onGlobalLayout() {
             try {
                 if (!enabled || root.getVisibility() != android.view.View.VISIBLE) return;
+                // 关闭/滑出屏幕的面板仍是 VISIBLE，若继续扫描会把它的名单规则
+                // 应用到另一侧，造成“先开 A，B 的同名入口也消失”。只处理真正在屏幕内、
+                // 且处于显示状态的面板。
+                if (!root.isShown() || root.getAlpha() == 0f) return;
+                int[] loc = new int[2];
+                root.getLocationOnScreen(loc);
+                int sw = root.getResources().getDisplayMetrics().widthPixels;
+                int rw = root.getWidth();
+                if (rw <= 0 || loc[0] + rw <= 0 || loc[0] >= sw) return;
                 applySidebarHides(root);
             } catch (Throwable ignored) {
             }
+        }
+    }
+
+    /** 隐藏/补位发生在绘制前：检测到错位时取消这一帧，等重排后再画，避免闪现空格。 */
+    private static class SidebarPreDrawListener
+            implements android.view.ViewTreeObserver.OnPreDrawListener {
+        private final android.view.View root;
+        private long lastSkip = 0L;
+
+        SidebarPreDrawListener(android.view.View root) {
+            this.root = root;
+        }
+
+        @Override
+        public boolean onPreDraw() {
+            try {
+                if (!enabled || root == null || !root.isShown()) return true;
+                long now = System.currentTimeMillis();
+                if (now - lastSkip < 150) return true;
+                if (normalizeGridsIfGap(root, 0)) {
+                    lastSkip = now;
+                    return false; // 这一帧先不画，布局完成后下一帧再画
+                }
+            } catch (Throwable ignored) {
+            }
+            return true;
         }
     }
 
@@ -2461,11 +2555,28 @@ public class MainHook implements IXposedHookLoadPackage {
             if (!enabled || root == null) return;
             int kind = sidebarKind(root);
             if (kind == 0) return;
+            activePanelRoot = panelRootOf(root);
             boolean left = kind == 1;
             Set<String> names = left ? sidebarHideNames : sidebarHideRightNames;
             boolean on = left ? sidebarHideEnabled : sidebarHideRightEnabled;
+            // 两侧开关都关时不碰任何网格；否则打开另一侧会触发恢复/重排，
+            // 把本侧已经摆好的行列打乱。
+            if (sidebarHideEnabled || sidebarHideRightEnabled) {
+                // 只恢复当前面板对应 kind 的记录，避免右侧打开时去动左侧网格。
+                reconcileSidebarHides(kind);
+            } else {
+                // 两侧都关：只做“补空洞”，把首个可见项没贴左边的网格重排一次。
+                normalizeGridsIfGap(root, 0);
+                return;
+            }
             if (!on || names == null || names.isEmpty()) return;
             scanSidebarEntries(root, names, kind, 0);
+            // 隐藏任务是 post 出去的，等它们执行后再按可见项校正一次网格位置。
+            try {
+                root.postDelayed(new NormalizeGridsTask(root), 120);
+                root.postDelayed(new NormalizeGridsTask(root), 300);
+            } catch (Throwable ignored) {
+            }
         } catch (Throwable ignored) {
         }
     }
@@ -2588,6 +2699,11 @@ public class MainHook implements IXposedHookLoadPackage {
 
     /** 取当前 View 所属面板根（最外层 SideBarNestedScrollView）的左右 kind。 */
     private static int panelKindOf(android.view.View v) {
+        android.view.View outer = panelRootOf(v);
+        return outer == null ? 0 : sidebarKind(outer);
+    }
+
+    private static android.view.View panelRootOf(android.view.View v) {
         android.view.View outer = null;
         android.view.View cur = v;
         for (int i = 0; i < 80 && cur != null; i++) {
@@ -2601,10 +2717,22 @@ public class MainHook implements IXposedHookLoadPackage {
                 break;
             }
         }
-        return outer == null ? 0 : sidebarKind(outer);
+        return outer;
     }
 
     /** 顶部/底部固定入口：设置(TopArea)、扫一扫(顶部网格)、更多功能(BottomButton)。 */
+    /** View 是否真的处于用户可见状态（已 attach、所有祖先可见、全局可见矩形非空）。 */
+    private static boolean isReallyVisible(android.view.View v) {
+        try {
+            if (v == null || v.getVisibility() != android.view.View.VISIBLE || !v.isShown()) return false;
+            android.graphics.Rect r = new android.graphics.Rect();
+            if (!v.getGlobalVisibleRect(r)) return false;
+            return r.width() > 0 && r.height() > 0;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     private static boolean isPanelChrome(android.view.View v) {
         android.view.View cur = v;
         for (int i = 0; i < 12 && cur != null; i++) {
@@ -2683,8 +2811,11 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             if (cols <= 0) cols = 3;
             int n = gl.getChildCount();
+            int idx = 0;
             for (int i = 0; i < n; i++) {
                 android.view.View c = gl.getChildAt(i);
+                // 跳过 GONE 项：否则隐藏项仍占一个 row/column spec，表现为第一格空白
+                if (c.getVisibility() != android.view.View.VISIBLE) continue;
                 android.view.ViewGroup.LayoutParams old = c.getLayoutParams();
                 int w = android.view.ViewGroup.LayoutParams.WRAP_CONTENT;
                 int h = android.view.ViewGroup.LayoutParams.WRAP_CONTENT;
@@ -2700,16 +2831,120 @@ public class MainHook implements IXposedHookLoadPackage {
                 }
                 android.widget.GridLayout.LayoutParams nlp =
                         new android.widget.GridLayout.LayoutParams(
-                                android.widget.GridLayout.spec(i / cols, 1),
-                                android.widget.GridLayout.spec(i % cols, 1));
+                                android.widget.GridLayout.spec(idx / cols, 1),
+                                android.widget.GridLayout.spec(idx % cols, 1));
                 nlp.width = w;
                 nlp.height = h;
                 nlp.setMargins(ml, mt, mr, mb);
                 c.setLayoutParams(nlp);
+                idx++;
             }
             gl.requestLayout();
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": relayout failed " + t);
+        }
+    }
+
+    private static class NormalizeGridsTask implements Runnable {
+        private final android.view.View root;
+
+        NormalizeGridsTask(android.view.View root) {
+            this.root = root;
+        }
+
+        @Override
+        public void run() {
+            try {
+                if (!enabled || root == null) return;
+                normalizeGridsIfGap(root, 0);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /** 递归处理面板内所有“左边留了空洞”的网格：只在首项未贴左时重排。 */
+    private static boolean normalizeGridsIfGap(android.view.View v, int depth) {
+        boolean did = false;
+        try {
+            if (v == null || depth > 30) return false;
+            if (v instanceof android.widget.GridLayout) {
+                android.widget.GridLayout gl = (android.widget.GridLayout) v;
+                int n = gl.getChildCount();
+                int visible = 0, gone = 0;
+                for (int i = 0; i < n; i++) {
+                    if (gl.getChildAt(i).getVisibility() == android.view.View.VISIBLE) visible++;
+                    else gone++;
+                }
+                // 除 GONE 外，还要检查“可见项实际位置”是否连续：
+                // 被 remove 的子项不会留下 GONE，但后面的项仍保留原列 spec，
+                // 表现为直播广场单独出现在第三列。
+                int cols = detectColumns(gl);
+                boolean misaligned = false;
+                if (cols > 0 && visible > 0) {
+                    int cell = Math.max(1, (gl.getWidth() - gl.getPaddingLeft() - gl.getPaddingRight()) / cols);
+                    int idx = 0;
+                    for (int i = 0; i < n; i++) {
+                        android.view.View c = gl.getChildAt(i);
+                        if (c.getVisibility() != android.view.View.VISIBLE) continue;
+                        int expected = gl.getPaddingLeft() + (idx % cols) * cell;
+                        if (c.getLeft() > expected + cell / 2) {
+                            misaligned = true;
+                            break;
+                        }
+                        idx++;
+                    }
+                }
+                if (misaligned && visible > 0) {
+                    // 位置错乱时以 700ms 节流重排；重排成功后 misaligned 会变 false。
+                    long now = System.currentTimeMillis();
+                    Long last = GRID_LAST_RELAYOUT.get(gl);
+                    if (last == null || now - last > 700) {
+                        GRID_LAST_RELAYOUT.put(gl, now);
+                        relayoutGrid(gl, cols);
+                        did = true;
+                    }
+                } else if (gone > 0 && visible > 0) {
+                    Integer last = GRID_NORMALIZED.get(gl);
+                    if (last == null || last.intValue() != visible) {
+                        GRID_NORMALIZED.put(gl, visible);
+                        relayoutGrid(gl, cols);
+                        did = true;
+                    }
+                }
+            }
+            if (v instanceof android.view.ViewGroup) {
+                android.view.ViewGroup g = (android.view.ViewGroup) v;
+                int n = Math.min(g.getChildCount(), 80);
+                for (int i = 0; i < n; i++) {
+                    if (normalizeGridsIfGap(g.getChildAt(i), depth + 1)) did = true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return did;
+    }
+
+    /** 找到 target 最近的 GridLayout 祖先，按可见项重排一次（含延迟二次纠正）。 */
+    private static void relayoutAncestorGrid(android.view.View target) {
+        try {
+            android.view.View cur = target;
+            for (int i = 0; i < 6 && cur != null; i++) {
+                android.view.ViewParent p = cur.getParent();
+                if (!(p instanceof android.view.View)) break;
+                cur = (android.view.View) p;
+                if (cur instanceof android.widget.GridLayout) {
+                    android.widget.GridLayout gl = (android.widget.GridLayout) cur;
+                    int cols = detectColumns(gl);
+                    relayoutGrid(gl, cols);
+                    try {
+                        gl.postDelayed(new RelayoutTask(gl, cols), 120);
+                        gl.postDelayed(new RelayoutTask(gl, cols), 400);
+                    } catch (Throwable ignored) {
+                    }
+                    return;
+                }
+            }
+        } catch (Throwable ignored) {
         }
     }
 
@@ -2759,6 +2994,11 @@ public class MainHook implements IXposedHookLoadPackage {
                 // 逐项重算几何得到错误左右侧。
                 int geomKind = forcedKind != 0 ? forcedKind : sidebarKind(tv);
                 int kind = geomKind;
+                // 顶部/底部固定入口：左右面板可能各有一份，且都挂同一个
+                // SideBarNestedScrollView。不能按“屏幕左半边/右半边”判断（左侧面板的
+                // 设置本身就在屏幕右侧），只能看这个 target 当前是否真的可见；
+                // 关闭面板里的那份 isShown=false / 全局可见区域为空，直接跳过。
+                if (forcedKind != 0 && isPanelChrome(tv) && !isReallyVisible(tv)) return;
                 // v11.10：只处理真正位于侧滑栏里的 View。名单编辑器自身的行文本
                 // 也会触发 setText，如果这里不先排除，会被当成侧滑栏入口 GONE 掉，
                 // 表现为「弹窗里名单空白」。
@@ -2802,16 +3042,33 @@ public class MainHook implements IXposedHookLoadPackage {
                 // 隐藏方式取决于「target 的直接父容器」，而不是面板左右：
                 //   网格里的项必须 removeFromGrid（GONE 会留空且不补位）；
                 //   纵向列表项才用 GONE。kind 仍用于名单归属判断（上面已按名单匹配过）。
+                // target 的直接父级可能只是单元格内部的 LinearLayout，真正的
+                // GridLayout 在更上层。对 Cell/Item 类型的 target 向上找最近网格，
+                // 移除“单元格根”，否则只 GONE 会留下一个空白格。
+                android.view.View gridChild = target;
                 android.view.ViewParent vp = target.getParent();
+                String tcn = target.getClass().getName();
+                if (tcn.contains("Cell") || tcn.contains("Item")) {
+                    for (int gi = 0; gi < 4 && vp instanceof android.view.View
+                            && !(vp instanceof android.widget.GridLayout); gi++) {
+                        gridChild = (android.view.View) vp;
+                        vp = gridChild.getParent();
+                    }
+                }
                 boolean inGrid = vp instanceof android.widget.GridLayout;
-                if (inGrid) {
-                    result = removeFromGrid(target, name);
+                // TopArea 的“单元格”往往是一个包含多个入口的 FrameLayout/LinearLayout，
+                // 从 GridLayout 里移除它会把观看历史等相邻入口一起带走。
+                // 顶部入口一律只 GONE，不参与 removeFromGrid。
+                if (inGrid && !tcn.contains("TopArea")) {
+                    result = removeFromGrid(gridChild, name);
                     // 补记正确的 kind（removeFromGrid 默认写 1）
                     synchronized (SIDEBAR_REMOVED) {
-                        Object[] rec = SIDEBAR_REMOVED.get(target);
+                        Object[] rec = SIDEBAR_REMOVED.get(gridChild);
                         if (rec != null && rec.length >= 5) rec[4] = kind;
                     }
                 } else {
+                    // 非网格入口（顶部胶囊/底栏）统一 GONE。不能 removeView：
+                    // 41.3.0 的 TopArea 容器移除后会把整块面板布局打乱（左右全白）。
                     result = "gone";
                     if (target.getVisibility() != android.view.View.GONE) {
                         synchronized (SIDEBAR_HIDDEN) {
@@ -2820,6 +3077,17 @@ public class MainHook implements IXposedHookLoadPackage {
                         }
                         target.setVisibility(android.view.View.GONE);
                     }
+                    // GONE 的格子仍保留原 row/column spec，抖音不会自动把后面的项前移，
+                    // 表现为中间一排只剩一个入口、左右空着。这里只对包含它的网格
+                    // 做一次可见项重排，不动其他容器。
+                    relayoutAncestorGrid(target);
+                }
+                // 每隐藏一个入口就立即按当前可见项校正一次网格，
+                // 避免等到 260ms 后才补位、用户先看到一排空格。
+                try {
+                    android.view.View pr = panelRootOf(tv);
+                    if (pr != null) normalizeGridsIfGap(pr, 0);
+                } catch (Throwable ignored) {
                 }
                 long now = System.currentTimeMillis();
                 if (now - lastLog > 800) {
@@ -2841,6 +3109,14 @@ public class MainHook implements IXposedHookLoadPackage {
                 Object o = param.thisObject;
                 if (!(o instanceof android.widget.GridLayout)) return;
                 android.widget.GridLayout gl = (android.widget.GridLayout) o;
+                // 关闭/缓存面板里的 GridLayout 也会走 onLayout；若继续按几何判左右，
+                // 会把另一侧名单应用到它身上（观看历史被右名单从左侧网格移除的根因）。
+                if (!isReallyVisible(gl)) return;
+                android.view.View activeRoot = activePanelRoot;
+                if (activeRoot != null) {
+                    android.view.View gridRoot = panelRootOf(gl);
+                    if (gridRoot != null && gridRoot != activeRoot) return;
+                }
                 int kind = sidebarKind(gl);
                 if (kind == 0) return;
                 Set<String> active = kind == 2 ? sidebarHideRightNames : sidebarHideNames;
@@ -7058,6 +7334,10 @@ public class MainHook implements IXposedHookLoadPackage {
      * 新加入名单但当前屏幕上还没隐藏的项，交给下次 setText/onLayout 自然处理。
      */
     private static void reconcileSidebarHides() {
+        reconcileSidebarHides(0);
+    }
+
+    private static void reconcileSidebarHides(int onlyKind) {
         // 1) 网格项（SIDEBAR_REMOVED）：name 不在其 kind 对应名单里 → 插回
         synchronized (SIDEBAR_REMOVED) {
             for (java.util.Map.Entry<android.view.View, Object[]> e
@@ -7067,6 +7347,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     Object[] rec = e.getValue();
                     String nm = rec.length > 3 && rec[3] instanceof String ? (String) rec[3] : null;
                     int kind = rec.length > 4 && rec[4] instanceof Integer ? (Integer) rec[4] : 1;
+                    if (onlyKind != 0 && kind != onlyKind) continue;
                     Set<String> active = kind == 2 ? sidebarHideRightNames : sidebarHideNames;
                     boolean enabledForKind = kind == 2 ? sidebarHideRightEnabled : sidebarHideEnabled;
                     // 仍在该名单且开关开 → 保持隐藏；否则恢复
@@ -7098,6 +7379,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     Object[] rec = e.getValue();
                     String nm = rec.length > 1 && rec[1] instanceof String ? (String) rec[1] : null;
                     int kind = rec.length > 2 && rec[2] instanceof Integer ? (Integer) rec[2] : 1;
+                    if (onlyKind != 0 && kind != onlyKind) continue;
                     Set<String> active = kind == 2 ? sidebarHideRightNames : sidebarHideNames;
                     boolean enabledForKind = kind == 2 ? sidebarHideRightEnabled : sidebarHideEnabled;
                     boolean keepHidden = enabledForKind && nm != null && active.contains(nm);
