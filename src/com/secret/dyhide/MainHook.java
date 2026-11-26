@@ -2510,7 +2510,16 @@ public class MainHook implements IXposedHookLoadPackage {
                 boolean maybe = (sidebarHideEnabled && sidebarHideNames.contains(text))
                         || (sidebarHideRightEnabled && sidebarHideRightNames.contains(text));
                 if (!maybe) return;
-                tv.postDelayed(new HideEntryTask(tv, text), 80);
+                // v11.15：setText 路径优先用面板根节点的 kind，而不是当前 TextView 的几何。
+                // 设置/扫一扫这类顶部入口在面板最终布局前就会 setText，单 View 判左右容易
+                // 把右侧入口算成左侧，导致左侧名单串到右侧。
+                int panelKind = panelKindOf(tv);
+                if (panelKind != 0) {
+                    tv.postDelayed(new HideEntryTask(tv, text, panelKind), 80);
+                } else if (!isPanelChrome(tv)) {
+                    tv.postDelayed(new HideEntryTask(tv, text), 80);
+                }
+                // panelKind==0 且属于顶部/底部固定入口：交给面板级扫描处理，避免误判。
             } catch (Throwable ignored) {
             }
         }
@@ -2575,6 +2584,41 @@ public class MainHook implements IXposedHookLoadPackage {
         }
         if (isSidebar) return 2;   // 几何拿不到时的兜底
         return 0;
+    }
+
+    /** 取当前 View 所属面板根（最外层 SideBarNestedScrollView）的左右 kind。 */
+    private static int panelKindOf(android.view.View v) {
+        android.view.View outer = null;
+        android.view.View cur = v;
+        for (int i = 0; i < 80 && cur != null; i++) {
+            String cn = cur.getClass().getName();
+            if (cn.contains("SideBarNestedScrollView")) outer = cur;
+            try {
+                android.view.ViewParent p = cur.getParent();
+                if (!(p instanceof android.view.View)) break;
+                cur = (android.view.View) p;
+            } catch (Throwable t) {
+                break;
+            }
+        }
+        return outer == null ? 0 : sidebarKind(outer);
+    }
+
+    /** 顶部/底部固定入口：设置(TopArea)、扫一扫(顶部网格)、更多功能(BottomButton)。 */
+    private static boolean isPanelChrome(android.view.View v) {
+        android.view.View cur = v;
+        for (int i = 0; i < 12 && cur != null; i++) {
+            String cn = cur.getClass().getName();
+            if (cn.contains("TopArea") || cn.contains("BottomButtonCellView")) return true;
+            try {
+                android.view.ViewParent p = cur.getParent();
+                if (!(p instanceof android.view.View)) break;
+                cur = (android.view.View) p;
+            } catch (Throwable t) {
+                break;
+            }
+        }
+        return false;
     }
 
     /** 子树中是否存在「入口网格」（子项 >= 6 的 GridLayout） */
