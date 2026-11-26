@@ -4255,12 +4255,21 @@ public class MainHook implements IXposedHookLoadPackage {
 
     private static void installSessionHook(ClassLoader cl) {
         try {
+            // 41.3.0：真正把上游会话列表写入 this.B 的入口是 BaseSessionListAdapter
+            // .LJLILLLLZI(List,boolean)；UI 从 LJLIIL()->setData()->BaseAdapter.x 渲染。
+            // 40.8.0：同名 LLD(List,boolean)。用 hookByArity（2 参数）规避参数类型/重载问题。
             Class<?> base = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.im.sdk.module.session.rips.list.BaseSessionListAdapter", cl);
-            // 40.8.0: LLD(List,boolean)/LJLLLLLL(List)；41.3.0: LJLILLLLZI(List,boolean)/setData(List)
-            hookFirst(base, new String[]{"LJLILLLLZI", "LLD"}, new Class[]{List.class, boolean.class}, new LldHook(), "session-ld");
-            hookFirst(base, new String[]{"setData", "justSetData", "LJLLLLLL"}, new Class[]{List.class}, new LjlHook(), "session-ljl");
-            XposedBridge.log(TAG + ": session hooks installed");
+            int a = hookByArity(base, new String[]{"LJLILLLLZI", "LLD"}, 2, new LldHook(), "session-ld");
+            // 兜底：直接过滤写入 BaseAdapter.x 的 setData/justSetData（RipsSessionListAdapter 覆写）
+            int b = hookByArity(base, new String[]{"setData", "justSetData", "LJLLLLLL"}, 1, new LjlHook(), "session-ljl");
+            try {
+                Class<?> rips = XposedHelpers.findClass(
+                        "com.ss.android.ugc.aweme.im.sdk.module.session.rips.list.RipsSessionListAdapter", cl);
+                b += hookByArity(rips, new String[]{"setData", "justSetData"}, 1, new LjlHook(), "session-rips");
+            } catch (Throwable ignored) {
+            }
+            XposedBridge.log(TAG + ": session hooks installed " + a + "/" + b);
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": session hook install failed: " + t);
         }
@@ -4283,12 +4292,20 @@ public class MainHook implements IXposedHookLoadPackage {
     /**
      * 版本兼容辅助：按候选方法名顺序尝试 hook，第一个成功即返回。
      * 用于应对抖音每版混淆方法名变化（如 LLD→LJLILLLLZI）。
+     *
+     * 注意：findAndHookMethod 的第三个参数是 Object... 可变参数。旧实现直接把
+     * Class<?>[] params 作为单个实参传入，Xposed 内部 getParameterClasses 遍历
+     * 时遇到 Class[] 元素会强转 Class 失败 → 所有 hookFirst 必然 ALL FAILED。
+     * 这里显式展开为 Object[]，把每个参数类作为独立 varargs 元素、回调放最后。
      */
     private static int hookFirst(Class<?> cls, String[] names, Class<?>[] params,
                                  XC_MethodHook hook, String label) {
+        Object[] args = new Object[params.length + 1];
+        System.arraycopy(params, 0, args, 0, params.length);
+        args[params.length] = hook;
         for (String nm : names) {
             try {
-                XposedHelpers.findAndHookMethod(cls, nm, params, hook);
+                XposedHelpers.findAndHookMethod(cls, nm, args);
                 XposedBridge.log(TAG + ": hookFirst " + label + " -> " + nm);
                 return 1;
             } catch (Throwable ignored) {
@@ -4319,6 +4336,57 @@ public class MainHook implements IXposedHookLoadPackage {
         }
         if (n == 0) XposedBridge.log(TAG + ": hookByArity " + label + " NONE");
         return n;
+    }
+
+    /** 粉丝搜索结果过滤：过滤入参 List（40.8 LJLLLLLL / 41.3 setData）。具名类规避 D8 匿名类问题。 */
+    private static class FollowerSearchHook extends XC_MethodHook {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            try {
+                Object a0 = param.args.length > 0 ? param.args[0] : null;
+                if (!(a0 instanceof List)) {
+                    diagFollowerSearch("arg-not-list");
+                    return;
+                }
+                List<?> list = (List<?>) a0;
+                boolean on = enabled && !uids.isEmpty()
+                        && isFeatureOn(featureOf("follower-search"));
+                ArrayList<Object> keep = new ArrayList<>(list.size());
+                int hit = 0;
+                for (Object item : list) {
+                    if (on && isHidden(item)) hit++;
+                    else keep.add(item);
+                }
+                if (System.currentTimeMillis() - lastRelSearchDiag > 6000) {
+                    lastRelSearchDiag = System.currentTimeMillis();
+                    StringBuilder types = new StringBuilder();
+                    for (Object it : list) {
+                        if (types.length() > 0) types.append("|");
+                        if (it == null) { types.append("null"); continue; }
+                        types.append(it.getClass().getSimpleName());
+                        String uu = resolveUid(it);
+                        types.append("(uid=").append(uu == null ? "-" : uu).append(")");
+                    }
+                    XposedBridge.log(TAG + ": fs-diag size=" + list.size()
+                            + " on=" + on + " hit=" + hit + " types=" + types);
+                }
+                if (hit > 0) {
+                    param.args[0] = keep;
+                    XposedBridge.log(TAG + ": filtered " + hit
+                            + " item(s) [follower-search-adapter]");
+                }
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + ": follower-search hook error: " + t);
+            }
+        }
+    }
+
+    /** 粉丝搜索状态变换（40.8 dB / 41.3 gG）：after 阶段对 state 展示 list 原地过滤。 */
+    private static class FollowerSearchStateHook extends XC_MethodHook {
+        @Override
+        protected void afterHookedMethod(MethodHookParam param) {
+            filterRelationState(param.thisObject, "follower-search-state");
+        }
     }
 
     /** 通用列表 + 关注/粉丝/分享 的统一过滤。 */
@@ -4424,10 +4492,14 @@ public class MainHook implements IXposedHookLoadPackage {
                 try {
                     Class<?> impl = XposedHelpers.findClass(cn, cl);
                     for (java.lang.reflect.Method m : impl.getDeclaredMethods()) {
-                        if (!"LJIIIZ".equals(m.getName())) continue;
-                        if (m.getParameterTypes().length != 2) continue;
+                        // 40.8.0 LJIIIZ(String,scene):List；41.3.0 该方法改名为 LJIIIIZZ
+                        // （LJIIIZ 被占用为 0 参 void）。按候选名 + 2 参数 + 返回 List 匹配。
+                        boolean nameOk = "LJIIIZ".equals(m.getName()) || "LJIIIIZZ".equals(m.getName());
+                        if (!nameOk || m.getParameterTypes().length != 2) continue;
+                        if (!List.class.isAssignableFrom(m.getReturnType())) continue;
                         XposedBridge.hookMethod(m, lsHook);
                         lsOk++;
+                        XposedBridge.log(TAG + ": localsearch hook -> " + cn + "." + m.getName());
                     }
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + ": localsearch hook failed [" + cn + "]: " + t);
@@ -4444,49 +4516,9 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> searchAd = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.following.ui.adapter.FollowerSearchAdapter", cl);
-            XposedHelpers.findAndHookMethod(searchAd, "LJLLLLLL", List.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            try {
-                                Object a0 = param.args.length > 0 ? param.args[0] : null;
-                                if (!(a0 instanceof List)) {
-                                    diagFollowerSearch("arg-not-list");
-                                    return;
-                                }
-                                List<?> list = (List<?>) a0;
-                                boolean on = enabled && !uids.isEmpty()
-                                        && isFeatureOn(featureOf("follower-search"));
-                                ArrayList<Object> keep = new ArrayList<>(list.size());
-                                int hit = 0;
-                                for (Object item : list) {
-                                    if (on && isHidden(item)) hit++;
-                                    else keep.add(item);
-                                }
-                                if (System.currentTimeMillis() - lastRelSearchDiag > 6000) {
-                                    lastRelSearchDiag = System.currentTimeMillis();
-                                    StringBuilder types = new StringBuilder();
-                                    for (Object it : list) {
-                                        if (types.length() > 0) types.append("|");
-                                        if (it == null) { types.append("null"); continue; }
-                                        types.append(it.getClass().getSimpleName());
-                                        String uu = resolveUid(it);
-                                        types.append("(uid=").append(uu == null ? "-" : uu).append(")");
-                                    }
-                                    XposedBridge.log(TAG + ": fs-diag size=" + list.size()
-                                            + " on=" + on + " hit=" + hit
-                                            + " types=" + types);
-                                }
-                                if (hit > 0) {
-                                    param.args[0] = keep;
-                                    XposedBridge.log(TAG + ": filtered " + hit
-                                            + " item(s) [follower-search-adapter]");
-                                }
-                            } catch (Throwable t) {
-                                XposedBridge.log(TAG + ": follower-search hook error: " + t);
-                            }
-                        }
-                    });
+            // 40.8.0 LJLLLLLL(List)；41.3.0 setData(List)。另有 LJLIIL(List):List（转换返回）。
+            hookByArity(searchAd, new String[]{"setData", "LJLLLLLL"}, 1,
+                    new FollowerSearchHook(), "follower-search-adapter");
             XposedBridge.log(TAG + ": follower-search adapter hook installed");
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": follower-search adapter hook failed: " + t);
@@ -4544,30 +4576,26 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + ": follower hooks failed: " + t);
         }
 
-        // 3b) 粉丝/关注页「搜索」：mB(String)->dB(Function1)->TA().setValue(...)
-        // 搜索走 LiveData state 本地变换，完全绕过 KA，所以隐藏联系人会被带回来。
-        // hook 父类 dB，在 after 阶段对最终 state 的展示 list 原地按 uid 过滤。
+        // 3b) 粉丝/关注页「搜索」：走 LiveData state 本地变换，绕过列表加载。
+        // 40.8.0 dB(Function1)+TA()；41.3.0 gG(Function1)+XF()（dB/TA 已删除）。
+        // hook 父类该方法，after 阶段对最终 state 的展示 list 原地过滤。
         try {
             Class<?> baseVm = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.following.ui.viewmodel.FollowerRelationViewModel", cl);
-            Class<?> fnCls = XposedHelpers.findClass("kotlin.jvm.functions.Function1", cl);
-            XposedHelpers.findAndHookMethod(baseVm, "dB", fnCls, new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    filterRelationState(param.thisObject, "follower-search-dB");
-                }
-            });
-            XposedBridge.log(TAG + ": follower-search dB hook installed");
+            hookByArity(baseVm, new String[]{"gG", "dB"}, 1,
+                    new FollowerSearchStateHook(), "follower-search-state");
+            XposedBridge.log(TAG + ": follower-search state hook installed");
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": follower-search dB hook failed: " + t);
+            XposedBridge.log(TAG + ": follower-search state hook failed: " + t);
         }
 
         // 4) 分享面板联系人
         try {
             Class<?> vm = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.im.share.IMSharePanelViewModel", cl);
-            // 40.8.0 IA(List)；41.3.0 NF(List)
-            hookFirst(vm, new String[]{"NF", "IA"}, new Class[]{List.class},
+            // 40.8.0 IA(List)；41.3.0 NF(List)——NF 内部 clear+addAll 到 LiveData 的 list，
+            // 过滤其入参即可。hookByArity(1) 规避参数类型匹配问题。
+            hookByArity(vm, new String[]{"NF", "IA"}, 1,
                     new GenericListHook("share"), "share-list");
             XposedBridge.log(TAG + ": share hook installed");
         } catch (Throwable t) {
@@ -4584,15 +4612,12 @@ public class MainHook implements IXposedHookLoadPackage {
             for (String cn : headAdapters) {
                 try {
                     Class<?> ad = XposedHelpers.findClass(cn, cl);
-                    // 40.8.0 LJLLLLLL(List,boolean)；41.3.0 getData():List
-                    if (hookFirst(ad, new String[]{"LJLLLLLL"},
-                            new Class[]{List.class, boolean.class},
-                            new GenericListHook("share-head"), "share-head-arg") == 0) {
-                        try {
-                            XposedHelpers.findAndHookMethod(ad, "getData",
-                                    new ReturnListFilter("share-head-getData"));
-                        } catch (Throwable ignored) {
-                        }
+                    // 40.8.0 LJLLLLLL(List,boolean)；41.3.0 getData():List（Lazy 里的 list）
+                    int h = hookByArity(ad, new String[]{"LJLLLLLL"}, 2,
+                            new GenericListHook("share-head"), "share-head-arg");
+                    if (h == 0) {
+                        hookByArity(ad, new String[]{"getData"}, 0,
+                                new ReturnListFilter("share-head-getData", true), "share-head-getData");
                     }
                     ok2++;
                 } catch (Throwable t) {
@@ -4630,8 +4655,8 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> listAdapter = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.im.share.sharelist.IMShareContactsListAdapter", cl);
-            // 40.8.0 LLD(List)；41.3.0 LJLLLL(List)/LJLJJI(List)
-            hookFirst(listAdapter, new String[]{"LJLLLL", "LJLJJI", "LLD"}, new Class[]{List.class},
+            // 40.8.0 LLD(List)；41.3.0 LJLLLL(List)/LJLJJI(List)/LLIILZL(List)
+            hookByArity(listAdapter, new String[]{"LJLLLL", "LJLJJI", "LLIILZL", "LLD"}, 1,
                     new GenericListHook("share-list"), "share-list");
             XposedBridge.log(TAG + ": share-list hooks installed");
         } catch (Throwable t) {
@@ -4642,9 +4667,10 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> vm2 = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.im.share.IMSharePanelViewModel", cl);
-            // 40.8.0 EA():List；41.3.0 IF():List
-            XposedHelpers.findAndHookMethod(vm2, "IF", new ReturnListFilter("share-vm-IF"));
-            XposedHelpers.findAndHookMethod(vm2, "EA", new ReturnListFilter("share-vm-EA"));
+            // 40.8.0 EA():List；41.3.0 IF():List——返回的是 LiveData 里的同一份 List 实例，
+            // UI/其它调用方持有原引用，setResult 无效，必须 mutate 原地删除。
+            hookByArity(vm2, new String[]{"IF", "EA"}, 0,
+                    new ReturnListFilter("share-vm-IF", true), "share-vm-list");
             XposedBridge.log(TAG + ": share-vm list hook installed");
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": share-vm EA hook failed: " + t);
@@ -4655,7 +4681,7 @@ public class MainHook implements IXposedHookLoadPackage {
             Class<?> picker = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.im.picker.rips.list.content.PickerAdapter", cl);
             // 40.8.0 LLD(List,Map)；41.3.0 LJLJI(List,Map)
-            hookFirst(picker, new String[]{"LJLJI", "LLD"}, new Class[]{List.class, java.util.Map.class},
+            hookByArity(picker, new String[]{"LJLJI", "LLD"}, 2,
                     new GenericListHook("picker"), "picker");
             XposedBridge.log(TAG + ": picker hook installed");
         } catch (Throwable t) {
@@ -4666,11 +4692,10 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> od = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.feed.ui.masklayer2.OptionsDialogV2", cl);
-            // 40.8.0 LJLLLLLL(List)；41.3.0 LJLL(List)
-            hookFirst(od, new String[]{"LJLL", "LJLLLLLL"}, new Class[]{List.class},
+            // 40.8.0 LJLLLLLL(List)；41.3.0 LJLL(List)/LJLLL(List)/LL(List)
+            // 一起看邀请面板的联系人行也走这里，过滤入参 list。
+            hookByArity(od, new String[]{"LJLL", "LJLLL", "LL", "LJLLLLLL"}, 1,
                     new GenericListHook("mask-list"), "mask-list");
-            try { XposedHelpers.findAndHookMethod(od, "LJZI", new ReturnListFilter("mask-getList")); } catch (Throwable ignored) {}
-            try { XposedHelpers.findAndHookMethod(od, "LLFF", new ReturnListFilter("mask-getList")); } catch (Throwable ignored) {}
             XposedBridge.log(TAG + ": mask hooks installed");
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": mask hooks failed: " + t);
@@ -4680,16 +4705,15 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> vm3 = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.mate.matelist.list.MateListDataVM", cl);
-            Class<?> cont = XposedHelpers.findClass("kotlin.coroutines.Continuation", cl);
             // 40.8.0 MA(String,List,Continuation)；41.3.0 QF(String,List,Continuation)
-            hookFirst(vm3, new String[]{"QF", "MA"}, new Class[]{String.class, List.class, cont},
+            hookByArity(vm3, new String[]{"QF", "MA"}, 3,
                     new GenericListHook("mate", 1), "mate-load");
-            // 40.8.0 HA()/IA()；41.3.0 MF()/NF()（均无参返回 List）
+            // 40.8.0 HA()/IA()；41.3.0 MF()/NF()（均无参返回 List）。
+            // MF() 返回 EzList 内部同一个 List 实例，UI 持有原引用 → setResult 无效，
+            // 必须 mutate=true 原地删除（这正是一直 "filtered" 却"能看到"的根因）。
             for (String m : new String[]{"MF", "NF", "HA", "IA"}) {
-                try {
-                    XposedHelpers.findAndHookMethod(vm3, m, new ReturnListFilter("mate-" + m));
-                } catch (Throwable t) {
-                }
+                hookByArity(vm3, new String[]{m}, 0,
+                        new ReturnListFilter("mate-" + m, true), "mate-" + m);
             }
             XposedBridge.log(TAG + ": mate hooks installed");
         } catch (Throwable t) {
@@ -4701,9 +4725,9 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> sortVm = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.mate.matelist.list.simplesort.MateListSimpleSortVM", cl);
-            Class<?> wk = XposedHelpers.findClass(wkName, cl);
-            hookFirst(sortVm, new String[]{"MF", "HA"},
-                    new Class[]{List.class, String.class, java.util.Map.class, wk},
+            // 40.8.0 HA(List,String,Map,X.07WK)；41.3.0 MF(List,String,Map,X.06CG)
+            // 第4参数短混淆类名会变，用 hookByArity(4) 规避。
+            hookByArity(sortVm, new String[]{"MF", "HA"}, 4,
                     new GenericListHook("mate-sort", 0), "mate-sort");
             XposedBridge.log(TAG + ": mate-sort hook installed");
             DexClassMap.recordHook("user_comparable", "用户排序比较器",
@@ -4738,24 +4762,28 @@ public class MainHook implements IXposedHookLoadPackage {
                     "com.ss.android.ugc.aweme.im.sdk.relations.core.fetch.RelationFetchManager", cl);
             Class<?> resp = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.im.sdk.relations.core.fetch.model.RelationFetchResponse", cl);
-            // 40.8.0 LJIILJJIL(J,resp)；41.3.0 LJIILL(J,resp)
-            hookFirst(fm, new String[]{"LJIILL", "LJIILJJIL"}, new Class[]{long.class, resp},
+            // 40.8.0 LJIILJJIL(J,resp)；41.3.0 LJIILL(J,resp)（2 参数、第2参数短混淆类）
+            hookByArity(fm, new String[]{"LJIILL", "LJIILJJIL"}, 2,
                     new RelationFetchHook(), "relation-fetch");
             XposedBridge.log(TAG + ": relation-fetch record hook installed");
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": relation-fetch record hook failed: " + t);
         }
 
-        // 24i) 互关页适配器数据提交：RawFamiliarFriendsAdapter.LJLLLLLL(List)
+        // 24i) 好友/朋友页适配器数据提交：RawFamiliarFriendsAdapter
+        // 40.8.0 LJLLLLLL(List)；41.3.0 setData(List)——这是写入 BaseAdapter.x 的真正入口，
+        // 必须过滤入参才能隐藏朋友列表里的联系人（旧代码只挂采集 hook，从不过滤）。
         try {
             Class<?> ad = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.friends.adapter.RawFamiliarFriendsAdapter", cl);
-            // 40.8.0 LJLLLLLL(List)；41.3.0 setData(List)
-            hookFirst(ad, new String[]{"setData", "LJLLLLLL"}, new Class[]{List.class},
-                    new ViewModelListRecordHook(), "familiar-adapter");
-            XposedBridge.log(TAG + ": familiar-adapter record hook installed");
+            hookByArity(ad, new String[]{"setData", "LJLLLLLL"}, 1,
+                    new GenericListHook("friend-list"), "friend-list-filter");
+            // 采集 hook 保留（昵称反查仍需要）
+            hookByArity(ad, new String[]{"setData", "LJLLLLLL"}, 1,
+                    new ViewModelListRecordHook(), "familiar-adapter-record");
+            XposedBridge.log(TAG + ": familiar-adapter filter+record hooks installed");
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": familiar-adapter record hook failed: " + t);
+            XposedBridge.log(TAG + ": familiar-adapter hook failed: " + t);
         }
 
         // 24h) 好友/互关页观察者直达采集
@@ -4902,30 +4930,17 @@ public class MainHook implements IXposedHookLoadPackage {
         }
 
         // 14) 互关列表行（friends.friendlist.RawFriendListItemViewHolder）
+        // 41.3.0：L3/E3/I3 → B3/G3/H3/N3(User,String) 与 E3/F3(User)。
+        // 用 hookByArity 按 arity 匹配，HideCellHook 从 args[0] 取 User。
         try {
             Class<?> holder = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.friends.friendlist.RawFriendListItemViewHolder", cl);
-            Class<?> userCls = XposedHelpers.findClass(T_USER, cl);
             int ok = 0;
-            try {
-                XposedHelpers.findAndHookMethod(holder, "L3",
-                        userCls, String.class, new HideCellHook("relation", "friend-row"));
-                ok++;
-            } catch (Throwable ignored) {
-            }
-            try {
-                XposedHelpers.findAndHookMethod(holder, "E3",
-                        userCls, String.class, new HideCellHook("relation", "friend-row"));
-                ok++;
-            } catch (Throwable ignored) {
-            }
-            try {
-                XposedHelpers.findAndHookMethod(holder, "I3",
-                        userCls, new HideCellHook("relation", "friend-row"));
-                ok++;
-            } catch (Throwable ignored) {
-            }
-            XposedBridge.log(TAG + ": friend-row hooks installed " + ok + "/3");
+            ok += hookByArity(holder, new String[]{"B3", "G3", "H3", "N3"}, 2,
+                    new HideCellHook("relation", "friend-row"), "friend-row-2");
+            ok += hookByArity(holder, new String[]{"E3", "F3"}, 1,
+                    new HideCellHook("relation", "friend-row"), "friend-row-1");
+            XposedBridge.log(TAG + ": friend-row hooks installed " + ok);
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": friend-row hooks failed: " + t);
         }
@@ -4967,9 +4982,10 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> vh5 = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.im.sdk.group.viewholder.CallingInviteFriendViewHolderV2", cl);
-            XposedHelpers.findAndHookMethod(vh5, "D3",
-                    int.class, Object.class, Object.class, new InviteD3HideHook());
-            XposedBridge.log(TAG + ": invite D3 uid-hide hook installed");
+            // 41.3.0：D3 → A3(int,Object,Object)，item 仍在 args[1]。
+            int n5 = hookByArity(vh5, new String[]{"A3", "D3"}, 3,
+                    new InviteD3HideHook(), "invite-d3");
+            XposedBridge.log(TAG + ": invite D3 uid-hide hook installed " + n5);
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": invite D3 uid-hide hook failed: " + t);
         }
@@ -5000,11 +5016,10 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> vh5b = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.im.sdk.relations.viewholder.BaseSelectViewHolder", cl);
-            Class<?> c5b = XposedHelpers.findClass(
-                    "com.ss.android.ugc.aweme.im.service.model.IMContact", cl);
-            XposedHelpers.findAndHookMethod(vh5b, "E3",
-                    c5b, String.class, new HideCellHook("share", "select-cell"));
-            XposedBridge.log(TAG + ": select-vh hook installed");
+            // 41.3.0：E3(IMContact,String) → B3(IMContact,String)，contact 在 args[0]。
+            int n5b = hookByArity(vh5b, new String[]{"B3", "E3"}, 2,
+                    new HideCellHook("share", "select-cell"), "select-vh");
+            XposedBridge.log(TAG + ": select-vh hook installed " + n5b);
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": select-vh hook failed: " + t);
         }
@@ -5050,23 +5065,13 @@ public class MainHook implements IXposedHookLoadPackage {
             Class<?> c4 = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.im.service.model.IMContact", cl);
             int ok4 = 0;
-            try {
-                XposedHelpers.findAndHookMethod(vh4, "E3", c4, new HideByArgHook(0));
-                ok4++;
-            } catch (Throwable ignored) {
-            }
-            try {
-                XposedHelpers.findAndHookMethod(vh4, "N3",
-                        c4, boolean.class, boolean.class, new HideByArgHook(0));
-                ok4++;
-            } catch (Throwable ignored) {
-            }
-            try {
-                XposedHelpers.findAndHookMethod(vh4, "Q3", c4, new HideByArgHook(0));
-                ok4++;
-            } catch (Throwable ignored) {
-            }
-            XposedBridge.log(TAG + ": share-contact-vh hooks installed " + ok4 + "/3");
+            // 41.3.0：E3(IMContact)→B3/N3(IMContact)，N3(IMContact,Z,Z)→J3(IMContact,Z,Z)。
+            // contact 始终在 args[0]，HideByArgHook(0) 不变。
+            ok4 += hookByArity(vh4, new String[]{"B3", "N3"}, 1,
+                    new HideByArgHook(0), "share-contact-1");
+            ok4 += hookByArity(vh4, new String[]{"J3"}, 3,
+                    new HideByArgHook(0), "share-contact-3");
+            XposedBridge.log(TAG + ": share-contact-vh hooks installed " + ok4);
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": share-contact-vh hooks failed: " + t);
         }
@@ -5075,12 +5080,10 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> vh3 = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.im.share.sharelist.viewholder.IMShareBaseViewHolder", cl);
-            Class<?> c3 = XposedHelpers.findClass(
-                    "com.ss.android.ugc.aweme.im.service.model.IMContact", cl);
-            XposedHelpers.findAndHookMethod(vh3, "D3",
-                    int.class, String.class, String.class, boolean.class, c3,
-                    new HideByArgHook(4));
-            XposedBridge.log(TAG + ": share-vh hook installed");
+            // 41.3.0：D3 → A3(int,String,String,boolean,IMContact)，contact 仍在 args[4]。
+            int n3 = hookByArity(vh3, new String[]{"A3", "D3"}, 5,
+                    new HideByArgHook(4), "share-vh");
+            XposedBridge.log(TAG + ": share-vh hook installed " + n3);
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": share-vh hook failed: " + t);
         }
@@ -5089,10 +5092,10 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> vh2 = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.im.sdk.share.panel.viewholder.SharePanelRecentShareViewHolder", cl);
-            Class<?> c2 = XposedHelpers.findClass(
-                    "com.ss.android.ugc.aweme.im.service.model.IMContact", cl);
-            XposedHelpers.findAndHookMethod(vh2, "D3", c2, new HideCellHook("share", "recent-share"));
-            XposedBridge.log(TAG + ": recent-share hook installed");
+            // 41.3.0：D3(IMContact) → A3(IMContact)，contact 在 args[0]。
+            int n2 = hookByArity(vh2, new String[]{"A3", "D3"}, 1,
+                    new HideCellHook("share", "recent-share"), "recent-share");
+            XposedBridge.log(TAG + ": recent-share hook installed " + n2);
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": recent-share hook failed: " + t);
         }
@@ -5101,11 +5104,10 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> holder = XposedHelpers.findClass(
                     "com.ss.android.ugc.aweme.im.sdk.share.panel.IMBaseViewHolder", cl);
-            Class<?> contact = XposedHelpers.findClass(
-                    "com.ss.android.ugc.aweme.im.service.model.IMContact", cl);
-            XposedHelpers.findAndHookMethod(holder, "E3", contact, String.class,
-                    new HideCellHook("share", "share-cell"));
-            XposedBridge.log(TAG + ": share-cell hook installed");
+            // 41.3.0：E3(IMContact,String) → B3(IMContact,String)，contact 在 args[0]。
+            int n8 = hookByArity(holder, new String[]{"B3", "E3"}, 2,
+                    new HideCellHook("share", "share-cell"), "share-cell");
+            XposedBridge.log(TAG + ": share-cell hook installed " + n8);
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": share-cell hook failed: " + t);
         }
@@ -6985,7 +6987,14 @@ public class MainHook implements IXposedHookLoadPackage {
             if (vm == null || !enabled || uids.isEmpty()) return;
             String fk = featureOf(label);
             if (fk != null && !isFeatureOn(fk)) return;
-            Object liveData = XposedHelpers.callMethod(vm, "TA");
+            // 40.8.0 TA()；41.3.0 XF()（TA 已删除）——两个候选都试。
+            Object liveData = null;
+            try { liveData = XposedHelpers.callMethod(vm, "XF"); } catch (Throwable ignored) {
+            }
+            if (liveData == null) {
+                try { liveData = XposedHelpers.callMethod(vm, "TA"); } catch (Throwable ignored) {
+                }
+            }
             if (liveData == null) return;
             Object state = XposedHelpers.callMethod(liveData, "getValue");
             if (state == null) return;
