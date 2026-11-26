@@ -2044,6 +2044,11 @@ public class MainHook implements IXposedHookLoadPackage {
                         "com.ss.android.ugc.aweme.im.business.cleanstoragepage.v2.conversation.ConversationCleanAdapter");
                 v2 = hookByArity(c2, new String[]{"onBindViewHolder"}, 2,
                         new CleanRowFilter(), "clean-v2-bind");
+                // 41.3.0 滑动/局部刷新走 3 参重载 onBindViewHolder(vh,pos,List)。
+                // 只挂 2 参时首次进入正常、上下滑动后隐藏行重现——必须补挂 3 参。
+                // CleanRowFilter 只读 args[0]=holder / args[1]=pos，天然兼容 3 参。
+                v2 += hookByArity(c2, new String[]{"onBindViewHolder"}, 3,
+                        new CleanRowFilter(), "clean-v2-bind3");
                 Class<?> vh2 = cl.loadClass(
                         "com.ss.android.ugc.aweme.im.business.cleanstoragepage.v2.conversation.ConversationCleanAdapter$ConversationViewHolder");
                 v2 += hookByArity(vh2, new String[]{"B3"}, 1,
@@ -2056,6 +2061,9 @@ public class MainHook implements IXposedHookLoadPackage {
                     "androidx.recyclerview.widget.RecyclerView", cl);
             XposedBridge.hookAllMethods(rvCls, "onLayout", new CleanRvLayoutHook());
             XposedBridge.hookAllMethods(rvCls, "onMeasure", new CleanRvMeasureHook());
+            // 滑动兜底：滑动不触发 measure/layout，bind 时昵称可能未就绪，
+            // 用 dispatchDraw 每帧（节流 400ms）扫描可见行压掉隐藏联系人。
+            XposedBridge.hookAllMethods(rvCls, "dispatchDraw", new CleanDrawHook());
             XposedBridge.log(TAG + ": clean-storage filter hook ok v2=" + v2);
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": clean-storage skip " + t.getClass().getSimpleName());
@@ -2281,6 +2289,30 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /** 折叠清理页里命中名单的行（gone=true 用 GONE，更彻底；false 用 INVISIBLE+高0） */
+    /**
+     * 聊天记录管理页滑动兜底：RV 滑动不会触发 onMeasure/onLayout，
+     * onBind 时昵称可能还没渲染，导致隐藏行重现。每帧 dispatchDraw 前扫描可见 child 压行。
+     * 仅作用于 clean adapter，带节流，避免全局性能损耗。
+     */
+    private static class CleanDrawHook extends XC_MethodHook {
+        private long last = 0L;
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            try {
+                long now = System.currentTimeMillis();
+                if (now - last < 400) return;
+                Object rv = param.thisObject;
+                Object ad = XposedHelpers.callMethod(rv, "getAdapter");
+                if (ad == null) return;
+                String an = ad.getClass().getName().toLowerCase(java.util.Locale.ROOT);
+                if (!an.contains("clean")) return;
+                last = now;
+                applyCleanCollapse(rv, true);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
     private static void applyCleanCollapse(Object rv, boolean gone) {
         try {
             if (!enabled || !cleanStorageHidden) return;
@@ -4453,6 +4485,57 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
+    /**
+     * 搜索结果页行级兜底：数据源元素混淆多变（X.10o/X.14NE/X.14BG/X.1PMi…），
+     * uid 反射经常取不到，但渲染出的昵称 TextView 是稳定的。这里在
+     * onBindBasicViewHolder(holder,pos) 后按昵称压行，未命中则恢复（处理 ViewHolder 复用）。
+     * 只压 View，不改数据，天然可逆、不影响其它页面。
+     */
+    private static class SearchRowHideHook extends XC_MethodHook {
+        private long lastLog = 0L;
+        @Override
+        protected void afterHookedMethod(MethodHookParam param) {
+            try {
+                Object holder = param.args.length > 0 ? param.args[0] : null;
+                if (holder == null) return;
+                Object itemView = XposedHelpers.getObjectField(holder, "itemView");
+                if (!(itemView instanceof android.view.View)) return;
+                android.view.View row = (android.view.View) itemView;
+                boolean hide = false;
+                String title = null;
+                if (enabled && !uids.isEmpty() && isFeatureOn(featureOf("follower-search"))) {
+                    title = rowTitle(row);
+                    if (title != null && isHiddenName(title)) hide = true;
+                }
+                android.view.ViewGroup.LayoutParams lp = row.getLayoutParams();
+                if (hide) {
+                    if (lp != null && lp.height != 0) {
+                        row.setTag(0x7E12, lp.height);
+                        lp.height = 0;
+                        row.setLayoutParams(lp);
+                    }
+                    row.setVisibility(android.view.View.GONE);
+                    long now = System.currentTimeMillis();
+                    if (now - lastLog > 1000) {
+                        lastLog = now;
+                        XposedBridge.log(TAG + ": search-row hidden " + title);
+                    }
+                } else {
+                    if (lp != null && lp.height == 0) {
+                        Object o = row.getTag(0x7E12);
+                        lp.height = o instanceof Integer ? (Integer) o
+                                : android.view.ViewGroup.LayoutParams.WRAP_CONTENT;
+                        row.setLayoutParams(lp);
+                    }
+                    if (row.getVisibility() != android.view.View.VISIBLE) {
+                        row.setVisibility(android.view.View.VISIBLE);
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
     /** 通用列表 + 关注/粉丝/分享 的统一过滤。 */
     private static class GenericListHook extends XC_MethodHook {
         private final String label;
@@ -4583,10 +4666,29 @@ public class MainHook implements IXposedHookLoadPackage {
             // 40.8.0 LJLLLLLL(List)；41.3.0 setData(List)。另有 LJLIIL(List):List（转换返回）。
             hookByArity(searchAd, new String[]{"setData", "LJLLLLLL"}, 1,
                     new FollowerSearchHook(), "follower-search-adapter");
-            XposedBridge.log(TAG + ": follower-search adapter hook installed");
+            // 行级兜底：数据源元素混淆多变、uid 取不到时，按渲染出的昵称压行。
+            int rowOk = hookByArity(searchAd, new String[]{"onBindBasicViewHolder"}, 2,
+                    new SearchRowHideHook(), "follower-search-row");
+            XposedBridge.log(TAG + ": follower-search adapter hook installed row=" + rowOk);
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": follower-search adapter hook failed: " + t);
         }
+
+        // 1b-2) 关注 / 共同关注搜索 adapter 行级兜底（与粉丝搜索同链路）
+        String[] searchAdapters = {
+                "com.ss.android.ugc.aweme.following.ui.adapter.FollowingSearchAdapter",
+                "com.ss.android.ugc.aweme.following.ui.adapter.CommonFollowingSearchAdapter",
+        };
+        int searchRowOk = 0;
+        for (String cn : searchAdapters) {
+            try {
+                Class<?> ad = XposedHelpers.findClass(cn, cl);
+                searchRowOk += hookByArity(ad, new String[]{"onBindBasicViewHolder"}, 2,
+                        new SearchRowHideHook(), "search-row:" + cn);
+            } catch (Throwable t) {
+            }
+        }
+        XposedBridge.log(TAG + ": search row hooks installed " + searchRowOk);
 
         // 2) 关注列表（FollowingRelationViewModel 子类的 HA）
         try {
@@ -6563,7 +6665,9 @@ public class MainHook implements IXposedHookLoadPackage {
             restoreAllCollapsedRows();
             applyTopBarVisibility(null);
             restoreProfileEntries();
-            restoreSidebarEntries();
+            // 侧滑栏「自定义删除入口」是独立功能，不属于本次临时恢复暂停的
+            // session/share/blockEnter 三项，临时显示期间必须继续保持隐藏，
+            // 不能 restoreSidebarEntries()（否则删掉的入口又冒出来）。
         }
         String tip = tempPaused
                 ? (tempTipOn.isEmpty() ? "已临时恢复：会话/进入拦截/分享面板暂停隐藏（再长按恢复）" : tempTipOn)
@@ -7298,6 +7402,22 @@ public class MainHook implements IXposedHookLoadPackage {
         if (cn.startsWith("X.14N") || cn.contains("14NE")) {
             String s = tryStr(item, new String[]{"LJIJ", "getUid", "getUidS", "getSecUid", "getUniqueId"});
             if (isHiddenUid(s)) return s;
+        }
+        // 41.3.0 粉丝搜索 state 元素 X.1PMi(int,User)：真正的 User 藏在字段 LIZIZ。
+        // 直接反射取该字段的 User 再取 uid，避免通用深挖被 int/int 字段干扰。
+        if (cn.startsWith("X.1PMi") || cn.equals("X.1PMi")) {
+            Object user = null;
+            try { user = XposedHelpers.getObjectField(item, "LIZIZ"); } catch (Throwable ignored) {
+            }
+            if (user != null) {
+                String s = uidOfAllowed(user);
+                if (isHiddenUid(s)) return s;
+                // 再兜底深挖 User
+                String d = findUidDeep(user, user.getClass(), 0);
+                if (d != null) return d;
+            }
+            String sd = findUidDeep(item, item.getClass(), 0);
+            if (sd != null) return sd;
         }
         Object o = matchAllowed(item, item.getClass(), 0);
         if (o != null) {
