@@ -150,18 +150,15 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile boolean menuWatchHistoryHidden = false;
     /** 侧边栏入口自定义删除：总开关。 */
     private static volatile boolean sidebarHideEnabled = false;
-    /** 左侧「我」页 ProfileSideBar 要删除的入口名称名单（用户自定义，默认空）。 */
+    /** 左侧「我」页侧滑栏要删除的入口名称名单（用户自定义，默认空）。 */
     private static volatile Set<String> sidebarHideNames = new HashSet<>();
-    /** 右侧首页 HomeSideBar 自定义删除：开关 + 名单。 */
+    /** 右侧首页侧滑栏自定义删除：开关 + 名单。 */
     private static volatile boolean sidebarHideRightEnabled = false;
     private static volatile Set<String> sidebarHideRightNames = new HashSet<>();
     /** 已 GONE 的菜单项 → {原visibility, name, kind}（关闭开关/名单差异更新时恢复）。 */
     private static final java.util.Map<android.view.View, Object[]> SIDEBAR_HIDDEN =
             java.util.Collections.synchronizedMap(
                     new java.util.WeakHashMap<android.view.View, Object[]>());
-    private static final java.util.Set<String> PROBE2 =
-            java.util.Collections.newSetFromMap(
-                    new java.util.WeakHashMap<String, Boolean>());
 
     /** 侧边栏内的网格容器缓存（只对它们做「布局后纠正」，避免全局开销）。 */
     private static final java.util.Set<android.widget.GridLayout> SIDEBAR_GRIDS =
@@ -2402,6 +2399,101 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": grid-fix skip " + t.getClass().getSimpleName());
         }
+        // v11.12：面板 View 会被缓存复用，重新打开时不一定再走 setText。
+        // 每次布局/重新可见时主动扫一遍面板内入口，实现「实时隐藏」。
+        String[] nsvClasses = new String[]{
+                "com.ss.android.ugc.aweme.sidebar.panel.ui.SideBarNestedScrollView",
+                "com.ss.android.ugc.aweme.sidebar.profilesidebar.panel.ui.ProfileSideBarNestedScrollView"
+        };
+        for (String cn : nsvClasses) {
+            try {
+                Class<?> nsv = XposedHelpers.findClassIfExists(cn, cl);
+                if (nsv == null) {
+                    XposedBridge.log(TAG + ": sidebar-layout miss " + cn);
+                    continue;
+                }
+                // 不依赖 onLayout 是否被该混淆类重写：构造时挂全局布局监听，
+                // 面板每次显示/重新布局都会回调，覆盖缓存复用场景。
+                XposedBridge.hookAllConstructors(nsv, new SidebarCtorHook());
+                XposedBridge.log(TAG + ": sidebar-entry hook ctor " + nsv.getSimpleName());
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + ": sidebar-layout skip " + cn + " " + t);
+            }
+        }
+    }
+
+    /** v11.12：侧滑栏容器构造时挂全局布局监听（应对 View 缓存复用） */
+    private static class SidebarCtorHook extends XC_MethodHook {
+        @Override
+        protected void afterHookedMethod(MethodHookParam param) {
+            try {
+                Object o = param.thisObject;
+                if (!(o instanceof android.view.View)) return;
+                android.view.View root = (android.view.View) o;
+                root.getViewTreeObserver().addOnGlobalLayoutListener(
+                        new SidebarGlobalLayoutListener(root));
+                XposedBridge.log(TAG + ": sidebar global-layout attached");
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + ": sidebar global-layout fail " + t);
+            }
+        }
+    }
+
+    private static class SidebarGlobalLayoutListener
+            implements android.view.ViewTreeObserver.OnGlobalLayoutListener {
+        private final android.view.View root;
+
+        SidebarGlobalLayoutListener(android.view.View root) {
+            this.root = root;
+        }
+
+        @Override
+        public void onGlobalLayout() {
+            try {
+                if (!enabled || root.getVisibility() != android.view.View.VISIBLE) return;
+                applySidebarHides(root);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /** 按当前面板属于左/右侧，遍历面板内所有入口文本并重新应用隐藏 */
+    private static void applySidebarHides(android.view.View root) {
+        try {
+            if (!enabled || root == null) return;
+            int kind = sidebarKind(root);
+            if (kind == 0) return;
+            boolean left = kind == 1;
+            Set<String> names = left ? sidebarHideNames : sidebarHideRightNames;
+            boolean on = left ? sidebarHideEnabled : sidebarHideRightEnabled;
+            if (!on || names == null || names.isEmpty()) return;
+            scanSidebarEntries(root, names, kind, 0);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void scanSidebarEntries(android.view.View v, Set<String> names,
+                                           int kind, int depth) {
+        if (v == null || depth > 40 || v.getVisibility() != android.view.View.VISIBLE) return;
+        if (v instanceof android.widget.TextView) {
+            if (!v.isShown()) return;
+            CharSequence cs = ((android.widget.TextView) v).getText();
+            if (cs == null) return;
+            String t = cs.toString().trim();
+            if (!t.isEmpty() && t.length() <= 24) {
+                // 不在这里按名单过滤：HideEntryTask 会同时校验名单和实际面板，
+                // 避免扫描阶段因集合状态不一致漏掉顶部入口。
+                v.post(new HideEntryTask(v, t, kind));
+            }
+            return;
+        }
+        if (v instanceof android.view.ViewGroup) {
+            android.view.ViewGroup g = (android.view.ViewGroup) v;
+            int n = Math.min(g.getChildCount(), 200);
+            for (int i = 0; i < n; i++) {
+                scanSidebarEntries(g.getChildAt(i), names, kind, depth + 1);
+            }
+        }
     }
 
     /** 文本设置时判断是否需要处理（先快速过滤，避免给所有 setText 都排任务） */
@@ -2417,8 +2509,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 if (!(param.thisObject instanceof android.view.View)) return;
                 android.view.View tv = (android.view.View) param.thisObject;
 
-                boolean maybe = "观看历史".equals(text)
-                        || (sidebarHideEnabled && sidebarHideNames.contains(text))
+                boolean maybe = (sidebarHideEnabled && sidebarHideNames.contains(text))
                         || (sidebarHideRightEnabled && sidebarHideRightNames.contains(text));
                 if (!maybe) return;
                 tv.postDelayed(new HideEntryTask(tv, text), 80);
@@ -2605,42 +2696,27 @@ public class MainHook implements IXposedHookLoadPackage {
     private static class HideEntryTask implements Runnable {
         private final android.view.View tv;
         private final String name;
+        private final int forcedKind;
         private static long lastLog = 0L;
 
         HideEntryTask(android.view.View tv, String name) {
+            this(tv, name, 0);
+        }
+
+        HideEntryTask(android.view.View tv, String name, int forcedKind) {
             this.tv = tv;
             this.name = name;
+            this.forcedKind = forcedKind;
         }
 
         @Override
         public void run() {
             try {
                 if (!enabled) return;
-                int geomKind = sidebarKind(tv);
+                // 布局扫描已确认面板归属时直接使用，避免面板开合动画过程中
+                // 逐项重算几何得到错误左右侧。
+                int geomKind = forcedKind != 0 ? forcedKind : sidebarKind(tv);
                 int kind = geomKind;
-                try {
-                    if ("观看历史".equals(name) && PROBE2.add(name + kind)) {
-                        StringBuilder pc = new StringBuilder();
-                        android.view.View wv = tv;
-                        for (int i = 0; i < 12 && wv != null; i++) {
-                            pc.append(wv.getClass().getName());
-                            try {
-                                android.view.ViewParent pp = wv.getParent();
-                                if (!(pp instanceof android.view.View)) break;
-                                wv = (android.view.View) pp;
-                                pc.append(" < ");
-                            } catch (Throwable t) {
-                                break;
-                            }
-                        }
-                        int[] loc = new int[2];
-                        tv.getLocationOnScreen(loc);
-                        XposedBridge.log(TAG + ": entry-probe2 name=" + name
-                                + " kind=" + kind + " loc=" + loc[0] + "," + loc[1]
-                                + " chain=" + pc);
-                    }
-                } catch (Throwable ignored) {
-                }
                 // v11.10：只处理真正位于侧滑栏里的 View。名单编辑器自身的行文本
                 // 也会触发 setText，如果这里不先排除，会被当成侧滑栏入口 GONE 掉，
                 // 表现为「弹窗里名单空白」。
